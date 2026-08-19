@@ -144,8 +144,7 @@ void box_top(std::vector<std::vector<Seg>>& f, const std::string& title) {
     std::vector<Seg> line;
     line.push_back({"┌─ ", C_SEC});
     line.push_back({title, C_HDR});
-    int used = 4 + disp_width(title) + 1;
-    int fill = std::max(1, W - 1 - used);
+    int fill = std::max(1, W - 4 - disp_width(title)); // 3 + title + fill + 1 = W
     line.push_back({repeat("─", fill), C_SEC});
     line.push_back({"┐", C_SEC});
     f.push_back(line);
@@ -163,9 +162,9 @@ void box_row(std::vector<std::vector<Seg>>& f, const std::vector<Seg>& content) 
     std::vector<Seg> line;
     line.push_back({"│ ", C_SEC});
     for (auto& s : content) line.push_back(s);
-    int used = 2 + 2;
+    int used = 3; // "│ " + "│"
     for (auto& s : content) used += disp_width(s.t);
-    if (used < W) line.push_back({std::string(W - used, ' '), C_TXT});
+    if (used < W) line.push_back({std::string(W - used, ' '), C_TXT}); // 2 + cw + pad + 1 = W
     line.push_back({"│", C_SEC});
     f.push_back(line);
 }
@@ -235,8 +234,8 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         snprintf(vb, sizeof(vb), "vram %5.1f/%5.1f GiB (%3.0f%%)  ",
                  g.vram_used_gb, g.vram_total_gb, vram_pct);
         row.push_back({vb, color_for(vram_pct)});
-        row.push_back({maybe(g.clock_mhz, " MHz") + "  ", C_DIM});
-        row.push_back({maybe(g.power_watts, " W"), C_DIM});
+        if (g.clock_mhz >= 0) row.push_back({maybe(g.clock_mhz, " MHz") + "  ", C_DIM});
+        if (g.power_watts >= 0) row.push_back({maybe(g.power_watts, " W"), C_DIM});
         box_row(f, row);
     }
     if (c.gpus.empty()) {
@@ -323,7 +322,7 @@ void tui_init() {
     init_pair(3, COLOR_YELLOW, -1);
     init_pair(4, COLOR_RED, -1);
     init_pair(5, COLOR_CYAN, -1);
-    init_pair(6, COLOR_GRAY, -1);
+    init_pair(6, COLOR_WHITE, -1); // GRAY невидим на тёмном фоне — берём белый
 }
 
 void tui_shutdown() {
