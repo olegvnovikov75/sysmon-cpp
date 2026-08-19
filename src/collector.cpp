@@ -71,6 +71,7 @@ void Collector::collect() {
     collect_cpu();
     collect_ram();
     collect_gpu();
+    collect_sensors();
     collect_net();
     collect_llm();
 }
@@ -117,7 +118,7 @@ void Collector::collect_cpu() {
 
 double Collector::cpu_temperature() {
     static const char* wanted[] = {"x86_pkg_temp", "cpu_thermal", "soc_thermal", "coretemp", nullptr};
-    char path[256];
+    char path[512];
     for (int z = 0; ; z++) {
         snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/type", z);
         std::string type;
@@ -131,6 +132,30 @@ double Collector::cpu_temperature() {
                 if (f >> t && t >= 1000) return t / 1000.0;
                 return -1.0;
             }
+        }
+    }
+    // hwmon: k10temp / coretemp / x86_pkg_temp (без fork'а sensors каждую секунду)
+    {
+        static const char* hw_wanted[] = {"k10temp", "coretemp", "x86_pkg_temp", nullptr};
+        DIR* hw = opendir("/sys/class/hwmon");
+        if (hw) {
+            struct dirent* e;
+            while ((e = readdir(hw)) != NULL) {
+                if (strncmp(e->d_name, "hwmon", 5) != 0) continue;
+                snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name", e->d_name);
+                std::string nm;
+                { std::ifstream nf(path); std::getline(nf, nm); }
+                for (int i = 0; hw_wanted[i]; i++) {
+                    if (nm == hw_wanted[i]) {
+                        snprintf(path, sizeof(path), "/sys/class/hwmon/%s/temp1_input", e->d_name);
+                        int t = 0;
+                        std::ifstream tf(path);
+                        if (tf >> t && t >= 1000) { closedir(hw); return t / 1000.0; }
+                        break;
+                    }
+                }
+            }
+            closedir(hw);
         }
     }
     // fallback: sensors (Tctl / Package id 0)
@@ -283,7 +308,7 @@ void Collector::collect_gpu() {
                 f = fopen(path, "r");
                 if (f) { if (fscanf(f, "%lu", &v) == 1) gpu.vram_total_gb = v / (1024.0 * 1024.0 * 1024.0); fclose(f); }
 
-                // температура: hwmon (glob)
+                // температура + мощность: hwmon (glob)
                 snprintf(path, sizeof(path), "/sys/class/drm/%s/device/hwmon/hwmon*/temp1_input", entry->d_name);
                 glob_t gb;
                 if (glob(path, GLOB_NOSORT, NULL, &gb) == 0 && gb.gl_pathc > 0) {
@@ -291,12 +316,56 @@ void Collector::collect_gpu() {
                     if (f) { long t = 0; if (fscanf(f, "%ld", &t) == 1 && t > 0) gpu.temperature = t / 1000.0; fclose(f); }
                     globfree(&gb);
                 }
+                snprintf(path, sizeof(path), "/sys/class/drm/%s/device/hwmon/hwmon*/power1_input", entry->d_name);
+                glob_t gp;
+                if (glob(path, GLOB_NOSORT, NULL, &gp) == 0 && gp.gl_pathc > 0) {
+                    f = fopen(gp.gl_pathv[0], "r");
+                    if (f) { long p = 0; if (fscanf(f, "%ld", &p) == 1 && p > 0) gpu.power_watts = p / 1000000.0; fclose(f); }
+                    globfree(&gp);
+                }
 
                 gpus.push_back(gpu);
             }
             closedir(drm);
         }
     }
+}
+
+// ---------- Датчики (hwmon, кроме CPU и GPU — они уже в своих секциях) ----------
+
+void Collector::collect_sensors() {
+    sensors.clear();
+    DIR* hw = opendir("/sys/class/hwmon");
+    if (!hw) return;
+    struct dirent* entry;
+    while ((entry = readdir(hw)) != NULL) {
+        if (strncmp(entry->d_name, "hwmon", 5) != 0) continue;
+        char path[512];
+        snprintf(path, sizeof(path), "/sys/class/hwmon/%s/name", entry->d_name);
+        std::ifstream nf(path);
+        std::string chip;
+        std::getline(nf, chip);
+        // CPU (k10temp/coretemp) и GPU (amdgpu) показаны в своих секциях;
+        // acpitz/ACAD — ACPI-зона и адаптер, часто врут или пусты
+        if (chip == "k10temp" || chip == "coretemp" || chip == "cpu_thermal" ||
+            chip == "acpitz" || chip == "ACAD" || chip == "amdgpu") continue;
+        for (int n = 1; n <= 8; n++) {
+            snprintf(path, sizeof(path), "/sys/class/hwmon/%s/temp%d_input", entry->d_name, n);
+            std::ifstream tf(path);
+            long millic = 0;
+            if (!(tf >> millic) || millic < 1000 || millic > 150000) continue; // отсев мёртвых датчиков
+            std::string label = "temp" + std::to_string(n);
+            snprintf(path, sizeof(path), "/sys/class/hwmon/%s/temp%d_label", entry->d_name, n);
+            std::ifstream lf(path);
+            std::string l;
+            if (std::getline(lf, l) && !l.empty()) label = l;
+            SensorStats s;
+            s.name = chip + " " + label;
+            s.temp = millic / 1000.0;
+            sensors.push_back(s);
+        }
+    }
+    closedir(hw);
 }
 
 // ---------- Сеть ----------

@@ -33,6 +33,11 @@ struct GPUStats {
     double power_watts = -1.0;
 };
 
+struct SensorStats {
+    std::string name;   // "nvme Composite", "eno1 PHY Temperature"
+    double temp = -1.0;
+};
+
 struct NetStats {
     struct Iface {
         std::string name;
@@ -68,6 +73,7 @@ public:
     CPUStats cpu;
     RAMStats ram;
     std::vector<GPUStats> gpus;
+    std::vector<SensorStats> sensors;  // hwmon-датчики кроме CPU/GPU (NVMe, NIC, ...)
     NetStats net;
     std::vector<LLMStats> llms;
 
@@ -81,6 +87,7 @@ private:
     void collect_cpu();
     void collect_ram();
     void collect_gpu();
+    void collect_sensors();
     void collect_net();
     void collect_llm();
 

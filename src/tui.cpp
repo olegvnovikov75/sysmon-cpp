@@ -9,6 +9,7 @@
 #ifndef COLOR_GRAY
 #define COLOR_GRAY COLOR_BLACK
 #endif
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -20,13 +21,79 @@ namespace {
 
 int W = 100;
 
-const attr_t C_HDR  = COLOR_PAIR(1) | A_BOLD;
-const attr_t C_OK   = COLOR_PAIR(2);
-const attr_t C_WARN = COLOR_PAIR(3);
-const attr_t C_HOT  = COLOR_PAIR(4);
-const attr_t C_SEC  = COLOR_PAIR(5);
-const attr_t C_DIM  = COLOR_PAIR(6);
-const attr_t C_TXT  = A_NORMAL;
+// весь текст белый (кроме % и баров) — по просьбе Шефа
+const attr_t C_TXT   = COLOR_PAIR(1);
+const attr_t C_DIM   = COLOR_PAIR(1);
+const attr_t C_SEC   = COLOR_PAIR(1);
+const attr_t C_HDR   = COLOR_PAIR(1) | A_BOLD;
+const attr_t C_WARN  = COLOR_PAIR(1) | A_BOLD;
+const attr_t C_OK    = COLOR_PAIR(2);
+const attr_t C_HOT   = COLOR_PAIR(4);
+const attr_t C_TRACK = COLOR_PAIR(6); // серый «хвост» прогресс-бара
+
+// плавный градиент синий(0%) -> красный(100%) через 256-цветную палитру
+const int GRAD_BASE  = 20;
+const int GRAD_STEPS = 32;
+
+void hsv2rgb(double h, double s, double v, int& r, int& g, int& b) {
+    double c = v * s;
+    double x = c * (1.0 - fabs(fmod(h / 60.0, 2.0) - 1.0));
+    double m = v - c;
+    double r1, g1, b1;
+    if (h < 60)       { r1=c; g1=x; b1=0; }
+    else if (h < 120) { r1=x; g1=c; b1=0; }
+    else if (h < 180) { r1=0; g1=c; b1=x; }
+    else if (h < 240) { r1=0; g1=x; b1=c; }
+    else if (h < 300) { r1=x; g1=0; b1=c; }
+    else              { r1=c; g1=0; b1=x; }
+    r = (int)((r1 + m) * 255 + 0.5);
+    g = (int)((g1 + m) * 255 + 0.5);
+    b = (int)((b1 + m) * 255 + 0.5);
+}
+
+int xterm256_nearest(int r, int g, int b) {
+    int best = 0, bestd = 0x7fffffff;
+    for (int i = 0; i < 6; i++)
+        for (int j = 0; j < 6; j++)
+            for (int k = 0; k < 6; k++) {
+                int cr = i ? i * 40 + 55 : 0;
+                int cg = j ? j * 40 + 55 : 0;
+                int cb = k ? k * 40 + 55 : 0;
+                int d = (cr-r)*(cr-r) + (cg-g)*(cg-g) + (cb-b)*(cb-b);
+                if (d < bestd) { bestd = d; best = 16 + 36*i + 6*j + k; }
+            }
+    for (int i = 0; i < 24; i++) {
+        int v = 8 + i * 10;
+        int d = (v-r)*(v-r) + (v-g)*(v-g) + (v-b)*(v-b);
+        if (d < bestd) { bestd = d; best = 232 + i; }
+    }
+    return best;
+}
+
+void init_gradient() {
+    for (int i = 0; i < GRAD_STEPS; i++) {
+        double t = (double)i / (GRAD_STEPS - 1);
+        double hue = 240.0 * (1.0 - t); // 240 (синий) -> 0 (красный)
+        int r, g, b;
+        hsv2rgb(hue, 1.0, 1.0, r, g, b);
+        init_pair(GRAD_BASE + i, xterm256_nearest(r, g, b), -1);
+    }
+}
+
+attr_t grad_attr(double r) {
+    if (r < 0) r = 0;
+    if (r > 1) r = 1;
+    int idx = (int)(r * (GRAD_STEPS - 1) + 0.5);
+    if (idx < 0) idx = 0;
+    if (idx >= GRAD_STEPS) idx = GRAD_STEPS - 1;
+    return COLOR_PAIR(GRAD_BASE + idx);
+}
+
+// цвет % индикатора = цвет бара на его уровне
+attr_t pct_attr(double pct) {
+    if (pct < 0) return C_DIM;
+    return grad_attr(pct / 100.0);
+}
 
 struct Seg { std::string t; attr_t a; };
 
@@ -73,13 +140,6 @@ void draw_line(int y, const std::vector<Seg>& segs) {
     }
 }
 
-attr_t color_for(double pct) {
-    if (pct < 0) return C_DIM;
-    if (pct < 60) return C_OK;
-    if (pct < 85) return C_WARN;
-    return C_HOT;
-}
-
 std::string repeat(const std::string& s, int n) {
     std::string r;
     r.reserve(s.size() * n);
@@ -87,20 +147,14 @@ std::string repeat(const std::string& s, int n) {
     return r;
 }
 
-// градиент синий(0) -> красный(100): цвет ячейки зависит от её позиции в баре
-attr_t grad_for(int i, int width) {
-    double r = width > 1 ? (double)i / (width - 1) : 1.0;
-    if (r < 0.35) return COLOR_PAIR(5); // cyan
-    if (r < 0.60) return COLOR_PAIR(2); // green
-    if (r < 0.85) return COLOR_PAIR(3); // yellow
-    return COLOR_PAIR(4);              // red
-}
-
+// бар: цвет ячейки — градиент по её позиции (лево = синий, право = красный)
 void add_bar(std::vector<Seg>& row, double pct, int width) {
     int filled = (pct < 0) ? 0 : (int)(pct / 100.0 * width + 0.5);
     if (filled > width) filled = width;
-    for (int i = 0; i < width; i++)
-        row.push_back({i < filled ? "█" : "░", i < filled ? grad_for(i, width) : C_DIM});
+    for (int i = 0; i < width; i++) {
+        double r = width > 1 ? (double)i / (width - 1) : 1.0;
+        row.push_back({i < filled ? "█" : "░", i < filled ? grad_attr(r) : C_TRACK});
+    }
 }
 
 std::string fmt1(double v) {
@@ -198,7 +252,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
     {
         std::vector<Seg> row;
         char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", c.cpu.usage);
-        row.push_back({b, color_for(c.cpu.usage)});
+        row.push_back({b, pct_attr(c.cpu.usage)});
         row.push_back({{"  "}, C_TXT});
         add_bar(row, c.cpu.usage, 24);
         char lb[48];
@@ -211,10 +265,10 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         std::vector<Seg> trow;
         if (c.cpu.temperature >= 0) {
             char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", c.cpu.temperature);
-            trow.push_back({tb, color_for(c.cpu.temperature)});
+            trow.push_back({tb, pct_attr(c.cpu.temperature)});
             trow.push_back({"  ", C_TXT});
             add_bar(trow, std::min(c.cpu.temperature, 100.0), 24);
-            trow.push_back({"  (шкала 0–100°C)", C_DIM});
+            trow.push_back({"  100°C", C_DIM});
         } else {
             trow.push_back({"temp —", C_DIM});
         }
@@ -226,13 +280,16 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
     box_top(f, "RAM");
     {
         std::vector<Seg> row;
-        char b[64];
-        snprintf(b, sizeof(b), "%6.1f / %6.1f GiB (%3.0f%%)  ",
-                 c.ram.used_gb, c.ram.total_gb, c.ram.usage_percent);
-        row.push_back({b, color_for(c.ram.usage_percent)});
+        // сначала % и бар, далее подробности
+        char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", c.ram.usage_percent);
+        row.push_back({b, pct_attr(c.ram.usage_percent)});
+        row.push_back({"  ", C_TXT});
         add_bar(row, c.ram.usage_percent, 24);
+        char d[64];
+        snprintf(d, sizeof(d), "  %6.1f / %6.1f GiB  ", c.ram.used_gb, c.ram.total_gb);
+        row.push_back({d, C_TXT});
         char sb[48];
-        snprintf(sb, sizeof(sb), "  swap %.2f / %.2f GiB", c.ram.swap_used_gb, c.ram.swap_total_gb);
+        snprintf(sb, sizeof(sb), "swap %.2f / %.2f GiB", c.ram.swap_used_gb, c.ram.swap_total_gb);
         row.push_back({sb, C_DIM});
         box_row(f, row);
     }
@@ -244,18 +301,30 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         box_top(f, "GPU " + std::to_string(g.index) + " — " + g.name);
         std::vector<Seg> row;
         char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", g.utilization);
-        row.push_back({b, color_for(g.utilization)});
+        row.push_back({b, pct_attr(g.utilization)});
         row.push_back({{"  "}, C_TXT});
         add_bar(row, g.utilization, 24);
-        row.push_back({"  " + maybe(g.temperature, "°C") + "  ", C_TXT});
         double vram_pct = (g.vram_total_gb > 0) ? 100.0 * g.vram_used_gb / g.vram_total_gb : -1.0;
         char vb[64];
-        snprintf(vb, sizeof(vb), "vram %5.1f/%5.1f GiB (%3.0f%%)  ",
+        snprintf(vb, sizeof(vb), "  vram %5.1f/%5.1f GiB (%3.0f%%)  ",
                  g.vram_used_gb, g.vram_total_gb, vram_pct);
-        row.push_back({vb, color_for(vram_pct)});
+        row.push_back({vb, C_TXT});
         if (g.clock_mhz >= 0) row.push_back({maybe(g.clock_mhz, " MHz") + "  ", C_DIM});
         if (g.power_watts >= 0) row.push_back({maybe(g.power_watts, " W"), C_DIM});
         box_row(f, row);
+
+        // строка 2: температура + бар (шкала 0..100°C)
+        std::vector<Seg> trow;
+        if (g.temperature >= 0) {
+            char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", g.temperature);
+            trow.push_back({tb, pct_attr(g.temperature)});
+            trow.push_back({"  ", C_TXT});
+            add_bar(trow, std::min(g.temperature, 100.0), 24);
+            trow.push_back({"  100°C", C_DIM});
+        } else {
+            trow.push_back({"temp —", C_DIM});
+        }
+        box_row(f, trow);
     }
     if (c.gpus.empty()) {
         box_sep(f);
@@ -274,10 +343,10 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
             box_top(f, "LLM : " + std::to_string(l.port) + " — " + l.model_name);
             std::vector<Seg> row;
             if (l.ctx_percent >= 0) {
-                char cb[64];
-                snprintf(cb, sizeof(cb), "ctx %3.0f%% (%s/%s tok)   ",
-                         l.ctx_percent, fmt_tok(l.ctx_used).c_str(), fmt_tok(l.ctx_limit).c_str());
-                row.push_back({cb, color_for(l.ctx_percent)});
+                row.push_back({"ctx ", C_TXT});
+                char cb[16]; snprintf(cb, sizeof(cb), "%3.0f%% ", l.ctx_percent);
+                row.push_back({cb, pct_attr(l.ctx_percent)});
+                row.push_back({"(" + fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok)   ", C_TXT});
             } else {
                 row.push_back({"ctx —   ", C_DIM});
             }
@@ -315,6 +384,25 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         }
     }
 
+    // Sensors — hwmon-датчики кроме CPU/GPU (NVMe, сетевые PHY/MAC, ...)
+    if (!c.sensors.empty()) {
+        box_sep(f);
+        box_top(f, "Sensors");
+        for (const auto& s : c.sensors) {
+            std::vector<Seg> row;
+            char nm[48]; snprintf(nm, sizeof(nm), "%-22s ", s.name.c_str());
+            row.push_back({nm, C_TXT});
+            if (s.temp >= 0) {
+                char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", s.temp);
+                row.push_back({tb, pct_attr(s.temp)});
+                row.push_back({"  ", C_TXT});
+                add_bar(row, std::min(s.temp, 100.0), 24);
+                row.push_back({"  100°C", C_DIM});
+            }
+            box_row(f, row);
+        }
+    }
+
     box_bottom(f);
 
     // footer
@@ -341,7 +429,8 @@ void tui_init() {
     init_pair(3, COLOR_YELLOW, -1);
     init_pair(4, COLOR_RED, -1);
     init_pair(5, COLOR_CYAN, -1);
-    init_pair(6, COLOR_WHITE, -1); // GRAY невидим на тёмном фоне — берём белый
+    init_pair(6, COLOR_GRAY, -1);  // серый трек бара (не для текста)
+    init_gradient();
 }
 
 void tui_shutdown() {

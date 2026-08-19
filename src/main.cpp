@@ -3,8 +3,11 @@
 #include <csignal>
 #include <cstdlib>
 #include <clocale>
+#include <cstdio>
 #include <thread>
 #include <chrono>
+
+#include <curl/curl.h>
 
 #include "collector.h"
 #include "tui.h"
@@ -52,14 +55,17 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    Collector c;
+    // явная инициализация curl (lazy-init внутри curl_easy_init гоняется с сигналами)
+    curl_global_init(CURL_GLOBAL_DEFAULT);
 
     if (once) {
         // два прохода: первый даёт базовые дельты (CPU 0.5с), второй — сеть за ~1с
+        Collector c;
         c.collect();
         std::this_thread::sleep_for(std::chrono::seconds(1));
         c.collect();
         render_text(c);
+        curl_global_cleanup();
         return 0;
     }
 
@@ -67,10 +73,17 @@ int main(int argc, char* argv[]) {
     setlocale(LC_NUMERIC, "C");  // точка в числах, как в sysmon.sh
     tui_init();
     bool paused = false;
-    while (g_running) {
-        if (!paused) c.collect();
-        if (!tui_frame(c, interval, paused)) break;
+    {
+        Collector c;
+        while (g_running) {
+            if (!paused) c.collect();
+            if (!tui_frame(c, interval, paused)) break;
+        }
+        tui_shutdown();
+        if (getenv("SYSMON_DEBUG")) fprintf(stderr, "[sysmon] endwin done\n");
     }
-    tui_shutdown();
+    if (getenv("SYSMON_DEBUG")) fprintf(stderr, "[sysmon] collector destroyed\n");
+    curl_global_cleanup();
+    if (getenv("SYSMON_DEBUG")) fprintf(stderr, "[sysmon] curl cleaned\n");
     return 0;
 }
