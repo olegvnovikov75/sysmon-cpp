@@ -87,13 +87,20 @@ std::string repeat(const std::string& s, int n) {
     return r;
 }
 
-Seg bar(double pct, int width) {
+// градиент синий(0) -> красный(100): цвет ячейки зависит от её позиции в баре
+attr_t grad_for(int i, int width) {
+    double r = width > 1 ? (double)i / (width - 1) : 1.0;
+    if (r < 0.35) return COLOR_PAIR(5); // cyan
+    if (r < 0.60) return COLOR_PAIR(2); // green
+    if (r < 0.85) return COLOR_PAIR(3); // yellow
+    return COLOR_PAIR(4);              // red
+}
+
+void add_bar(std::vector<Seg>& row, double pct, int width) {
     int filled = (pct < 0) ? 0 : (int)(pct / 100.0 * width + 0.5);
     if (filled > width) filled = width;
-    std::string t;
-    t.reserve(width * 3);
-    for (int i = 0; i < width; i++) t += (i < filled) ? "█" : "░";
-    return {t, color_for(pct)};
+    for (int i = 0; i < width; i++)
+        row.push_back({i < filled ? "█" : "░", i < filled ? grad_for(i, width) : C_DIM});
 }
 
 std::string fmt1(double v) {
@@ -193,13 +200,25 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", c.cpu.usage);
         row.push_back({b, color_for(c.cpu.usage)});
         row.push_back({{"  "}, C_TXT});
-        row.push_back(bar(c.cpu.usage, 24));
-        row.push_back({"  " + maybe(c.cpu.temperature, "°C") + "   ", C_TXT});
+        add_bar(row, c.cpu.usage, 24);
         char lb[48];
-        snprintf(lb, sizeof(lb), "load %.2f %.2f %.2f   %d cores",
+        snprintf(lb, sizeof(lb), "  load %.2f %.2f %.2f   %d cores",
                  c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores);
         row.push_back({lb, C_DIM});
         box_row(f, row);
+
+        // строка 2: температура + бар (шкала 0..100°C)
+        std::vector<Seg> trow;
+        if (c.cpu.temperature >= 0) {
+            char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", c.cpu.temperature);
+            trow.push_back({tb, color_for(c.cpu.temperature)});
+            trow.push_back({"  ", C_TXT});
+            add_bar(trow, std::min(c.cpu.temperature, 100.0), 24);
+            trow.push_back({"  (шкала 0–100°C)", C_DIM});
+        } else {
+            trow.push_back({"temp —", C_DIM});
+        }
+        box_row(f, trow);
     }
 
     // RAM
@@ -211,7 +230,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         snprintf(b, sizeof(b), "%6.1f / %6.1f GiB (%3.0f%%)  ",
                  c.ram.used_gb, c.ram.total_gb, c.ram.usage_percent);
         row.push_back({b, color_for(c.ram.usage_percent)});
-        row.push_back(bar(c.ram.usage_percent, 24));
+        add_bar(row, c.ram.usage_percent, 24);
         char sb[48];
         snprintf(sb, sizeof(sb), "  swap %.2f / %.2f GiB", c.ram.swap_used_gb, c.ram.swap_total_gb);
         row.push_back({sb, C_DIM});
@@ -227,7 +246,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", g.utilization);
         row.push_back({b, color_for(g.utilization)});
         row.push_back({{"  "}, C_TXT});
-        row.push_back(bar(g.utilization, 24));
+        add_bar(row, g.utilization, 24);
         row.push_back({"  " + maybe(g.temperature, "°C") + "  ", C_TXT});
         double vram_pct = (g.vram_total_gb > 0) ? 100.0 * g.vram_used_gb / g.vram_total_gb : -1.0;
         char vb[64];
@@ -244,27 +263,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         box_row(f, {{"не найдена (нет nvidia-smi и AMD sysfs)", C_DIM}});
     }
 
-    // Network
-    box_sep(f);
-    box_top(f, "Network");
-    if (c.net.ifaces.empty()) {
-        box_row(f, {{"нет активных интерфейсов", C_DIM}});
-    } else {
-        for (const auto& ifc : c.net.ifaces) {
-            std::vector<Seg> row;
-            char nm[16]; snprintf(nm, sizeof(nm), "%-10s ", ifc.name.c_str());
-            row.push_back({nm, C_TXT});
-            row.push_back({"↓ ", C_SEC});
-            char rb[32]; snprintf(rb, sizeof(rb), "%7.1f MB/s  ", ifc.rx_mbps);
-            row.push_back({rb, C_TXT});
-            row.push_back({"↑ ", C_SEC});
-            char tb[32]; snprintf(tb, sizeof(tb), "%7.1f MB/s", ifc.tx_mbps);
-            row.push_back({tb, C_TXT});
-            box_row(f, row);
-        }
-    }
-
-    // LLM
+    // LLM (перед Network — по просьбе Шефа)
     if (c.llms.empty()) {
         box_sep(f);
         box_top(f, "LLM");
@@ -293,6 +292,26 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
             row2.push_back({"reqs " + (l.requests_processing >= 0 ? std::to_string(l.requests_processing) : std::string("—")), C_DIM});
             if (!l.metrics_ok) row2.push_back({"   (метрики недоступны)", C_WARN});
             box_row(f, row2);
+        }
+    }
+
+    // Network
+    box_sep(f);
+    box_top(f, "Network");
+    if (c.net.ifaces.empty()) {
+        box_row(f, {{"нет активных интерфейсов", C_DIM}});
+    } else {
+        for (const auto& ifc : c.net.ifaces) {
+            std::vector<Seg> row;
+            char nm[16]; snprintf(nm, sizeof(nm), "%-10s ", ifc.name.c_str());
+            row.push_back({nm, C_TXT});
+            row.push_back({"↓ ", C_SEC});
+            char rb[32]; snprintf(rb, sizeof(rb), "%7.1f MB/s  ", ifc.rx_mbps);
+            row.push_back({rb, C_TXT});
+            row.push_back({"↑ ", C_SEC});
+            char tb[32]; snprintf(tb, sizeof(tb), "%7.1f MB/s", ifc.tx_mbps);
+            row.push_back({tb, C_TXT});
+            box_row(f, row);
         }
     }
 
