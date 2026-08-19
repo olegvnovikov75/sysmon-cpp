@@ -39,33 +39,36 @@ int disp_width(const std::string& s) {
 
 void draw_line(int y, const std::vector<Seg>& segs) {
     if (y < 0 || y >= LINES) return;
+    if (getenv("SYSMON_DEBUG"))
+        fprintf(stderr, "[tui] line %d W=%d COLS=%d LINES=%d\n", y, W, COLS, LINES);
     move(y, 0);
     int x = 0;
     for (const auto& s : segs) {
         if (x >= W) break;
-        // сколько байт сегмента помещается в оставшиеся колонки
+        // обрезать сегмент по колонкам (addnstr с n криво считает multi-byte)
         size_t i = 0, used = 0;
-        while (i < s.t.size() && x < W) {
+        int cols = 0;
+        while (i < s.t.size() && cols < W - x) {
             unsigned char c = s.t[i];
-            if (c < 0x80) { used++; i++; }
+            if (c < 0x80) { used++; i++; cols++; }
             else if (c >= 0xC0) {
                 int len = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : 2;
                 if (i + len > s.t.size()) len = (int)(s.t.size() - i);
-                used += len; i += len;
+                used += len; i += len; cols++;
             }
             else i++; // stray continuation byte
         }
         if (used > 0) {
             attron(s.a);
-            addnstr(s.t.substr(0, used).c_str(), W - x);
+            addstr(s.t.substr(0, used).c_str());
             attroff(s.a);
         }
-        x += disp_width(s.t.substr(0, used));
+        x += cols;
     }
     // подчистить хвост строки
     if (x < W) {
         attron(C_DIM);
-        addnstr(std::string(W - x, ' ').c_str(), W - x);
+        addstr(std::string(W - x, ' ').c_str());
         attroff(C_DIM);
     }
 }

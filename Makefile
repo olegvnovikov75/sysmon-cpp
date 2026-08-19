@@ -1,6 +1,6 @@
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2
-LDFLAGS = -lncurses -lcurl
+LDFLAGS = -lncursesw -lcurl
 
 SRCDIR = src
 INCDIR = include
