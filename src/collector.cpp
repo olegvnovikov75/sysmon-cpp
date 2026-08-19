@@ -267,10 +267,12 @@ void Collector::collect_gpu() {
                 gpu.index = idx;
                 gpu.name = trim(name);
                 gpu.utilization = util >= 0 ? (double)util : -1.0;
-                gpu.vram_used_gb = mu / (1024.0 * 1024.0);
-                gpu.vram_total_gb = mt / (1024.0 * 1024.0);
+                // nvidia-smi (nounits) отдаёт VRAM в MiB
+                gpu.vram_used_gb = mu / 1024.0;
+                gpu.vram_total_gb = mt / 1024.0;
                 gpu.temperature = temp >= 0 ? (double)temp : -1.0;
                 gpu.clock_mhz = clk >= 0 ? (double)clk : -1.0;
+                if (pow > 0) gpu.power_watts = pow; // [N/A] -> -1 (не показываем)
                 gpus.push_back(gpu);
             }
         }
