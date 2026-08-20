@@ -233,6 +233,54 @@ void box_row(std::vector<std::vector<Seg>>& f, const std::vector<Seg>& content) 
     f.push_back(line);
 }
 
+// Привести сегменты ровно к target дисплейным колонкам (дополнить пробелами / обрезать)
+std::vector<Seg> fit_width(std::vector<Seg> segs, int target) {
+    if (target < 0) target = 0;
+    int total = 0;
+    for (auto& s : segs) total += disp_width(s.t);
+    if (total < target) { segs.push_back({std::string(target - total, ' '), C_TXT}); return segs; }
+    if (total == target) return segs;
+    std::vector<Seg> out;
+    int used = 0;
+    for (auto& s : segs) {
+        if (used >= target) break;
+        int rem = target - used;
+        const std::string& t = s.t;
+        int cols = 0; size_t i = 0;
+        while (i < t.size() && cols < rem) {
+            unsigned char ch = t[i];
+            if (ch < 0x80) { i++; cols++; }
+            else if (ch >= 0xC0) {
+                int len = (ch >= 0xF0) ? 4 : (ch >= 0xE0) ? 3 : 2;
+                if (i + len > t.size()) len = (int)(t.size() - i);
+                i += len; cols++;
+            } else i++;
+        }
+        out.push_back({t.substr(0, i), s.a});
+        used += cols;
+    }
+    return out;
+}
+
+// Строка-бар: описание (слева) + значение (справа, перед баром) + бар у правого края.
+// Все бары выровнены в одну колонку. value<0 → «—» и пустой бар. unit = "%" или "°C".
+void bar_row(std::vector<std::vector<Seg>>& f, std::vector<Seg> desc, double value, const std::string& unit = "%") {
+    std::vector<Seg> line;
+    line.push_back({"│ ", C_SEC});
+    int desc_w = W - 35;                       // описание; остальное — значение(5) + пробел + бар(26) + рамка
+    for (auto& s : fit_width(desc, desc_w)) line.push_back(s);
+    std::string vs; attr_t va = C_DIM;
+    if (value >= 0) { char b[16]; snprintf(b, sizeof(b), "%.0f%s", value, unit.c_str()); vs = b; va = pct_attr(value); }
+    else vs = "—";
+    int vw = disp_width(vs);
+    if (vw < 5) vs = std::string(5 - vw, ' ') + vs;   // значение — справа в 5 колонках
+    line.push_back({vs, va});
+    line.push_back({" ", C_TXT});
+    add_bar(line, value, 24);
+    line.push_back({"│", C_SEC});
+    f.push_back(line);
+}
+
 std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool paused) {
     std::vector<std::vector<Seg>> f;
 
@@ -253,47 +301,25 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
     box_sep(f);
     box_top(f, c.cpu.model.empty() ? "CPU" : "CPU — " + c.cpu.model);
     {
-        std::vector<Seg> row;
-        char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", c.cpu.usage);
-        row.push_back({b, pct_attr(c.cpu.usage)});
-        row.push_back({{"  "}, C_TXT});
-        add_bar(row, c.cpu.usage, 24);
+        std::vector<Seg> desc;
         char lb[48];
-        snprintf(lb, sizeof(lb), "  load %.2f %.2f %.2f   %d cores",
+        snprintf(lb, sizeof(lb), "load %.2f %.2f %.2f   %d cores",
                  c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores);
-        row.push_back({lb, C_DIM});
-        box_row(f, row);
-
-        // строка 2: температура + бар (шкала 0..100°C)
-        std::vector<Seg> trow;
-        if (c.cpu.temperature >= 0) {
-            char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", c.cpu.temperature);
-            trow.push_back({tb, pct_attr(c.cpu.temperature)});
-            trow.push_back({"  ", C_TXT});
-            add_bar(trow, std::min(c.cpu.temperature, 100.0), 24);
-        } else {
-            trow.push_back({"temp —", C_DIM});
-        }
-        box_row(f, trow);
+        desc.push_back({lb, C_DIM});
+        bar_row(f, desc, c.cpu.usage, "%");
+        bar_row(f, {}, c.cpu.temperature, "°C");
     }
 
     // RAM
     box_sep(f);
     box_top(f, "RAM");
     {
-        std::vector<Seg> row;
-        // сначала % и бар, далее подробности
-        char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", c.ram.usage_percent);
-        row.push_back({b, pct_attr(c.ram.usage_percent)});
-        row.push_back({"  ", C_TXT});
-        add_bar(row, c.ram.usage_percent, 24);
+        std::vector<Seg> desc;
         char d[64];
-        snprintf(d, sizeof(d), "  %6.1f / %6.1f GiB  ", c.ram.used_gb, c.ram.total_gb);
-        row.push_back({d, C_TXT});
-        char sb[48];
-        snprintf(sb, sizeof(sb), "swap %.2f / %.2f GiB", c.ram.swap_used_gb, c.ram.swap_total_gb);
-        row.push_back({sb, C_DIM});
-        box_row(f, row);
+        snprintf(d, sizeof(d), "%6.1f / %6.1f GiB  swap %.2f / %.2f GiB",
+                 c.ram.used_gb, c.ram.total_gb, c.ram.swap_used_gb, c.ram.swap_total_gb);
+        desc.push_back({d, C_TXT});
+        bar_row(f, desc, c.ram.usage_percent, "%");
     }
 
     // GPU
@@ -301,31 +327,16 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         const auto& g = c.gpus[i];
         box_sep(f);
         box_top(f, "GPU " + std::to_string(g.index) + " — " + g.name);
-        std::vector<Seg> row;
-        char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", g.utilization);
-        row.push_back({b, pct_attr(g.utilization)});
-        row.push_back({{"  "}, C_TXT});
-        add_bar(row, g.utilization, 24);
+        std::vector<Seg> desc;
         double vram_pct = (g.vram_total_gb > 0) ? 100.0 * g.vram_used_gb / g.vram_total_gb : -1.0;
         char vb[64];
-        snprintf(vb, sizeof(vb), "  vram %5.1f/%5.1f GiB (%3.0f%%)  ",
+        snprintf(vb, sizeof(vb), "vram %5.1f/%5.1f GiB (%3.0f%%)",
                  g.vram_used_gb, g.vram_total_gb, vram_pct);
-        row.push_back({vb, C_TXT});
-        if (g.clock_mhz >= 0) row.push_back({maybe(g.clock_mhz, " MHz") + "  ", C_DIM});
-        if (g.power_watts >= 0) row.push_back({maybe(g.power_watts, " W"), C_DIM});
-        box_row(f, row);
-
-        // строка 2: температура + бар (шкала 0..100°C)
-        std::vector<Seg> trow;
-        if (g.temperature >= 0) {
-            char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", g.temperature);
-            trow.push_back({tb, pct_attr(g.temperature)});
-            trow.push_back({"  ", C_TXT});
-            add_bar(trow, std::min(g.temperature, 100.0), 24);
-        } else {
-            trow.push_back({"temp —", C_DIM});
-        }
-        box_row(f, trow);
+        desc.push_back({vb, C_TXT});
+        if (g.clock_mhz >= 0) desc.push_back({"  " + maybe(g.clock_mhz, " MHz"), C_DIM});
+        if (g.power_watts >= 0) desc.push_back({"  " + maybe(g.power_watts, " W"), C_DIM});
+        bar_row(f, desc, g.utilization, "%");
+        bar_row(f, {}, g.temperature, "°C");
     }
     if (c.gpus.empty()) {
         box_sep(f);
@@ -343,34 +354,25 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
             box_sep(f);
             box_top(f, "LLM : " + std::to_string(l.port) + " — " + l.model_name);
 
-            // строка «метка + % + бар» — тот же стиль, что CPU/RAM/GPU
-            auto pct_row = [&](const char* label, double pct, const std::string& extra) {
-                std::vector<Seg> r;
-                char lb[16]; snprintf(lb, sizeof(lb), "%-11s ", label);
-                r.push_back({lb, C_TXT});
-                // поле % — всегда 4 символа, чтобы бары выровнялись
-                if (pct >= 0) {
-                    char pb[16]; snprintf(pb, sizeof(pb), "%3.0f%%", pct);
-                    r.push_back({pb, pct_attr(pct)});
-                } else {
-                    r.push_back({"   —", C_DIM});
-                }
-                r.push_back({"  ", C_TXT});
-                add_bar(r, pct, 24);
-                if (!extra.empty()) r.push_back({"  " + extra, C_DIM});
-                box_row(f, r);
-            };
+            // ctx — бар (метка с токенами слева, бар справа)
+            {
+                std::vector<Seg> desc;
+                if (l.ctx_limit > 0)
+                    desc.push_back({"ctx " + fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok", C_TXT});
+                else
+                    desc.push_back({"ctx", C_TXT});
+                bar_row(f, desc, l.ctx_percent, "%");
+            }
+            // cache reuse / spec accept — бары
+            bar_row(f, {{"cache reuse", C_TXT}}, l.cache_reuse_percent, "%");
+            bar_row(f, {{"spec accept", C_TXT}}, l.spec_accept_percent, "%");
 
-            pct_row("ctx", l.ctx_percent,
-                    (l.ctx_limit > 0) ? fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok" : "");
-            pct_row("cache reuse", l.cache_reuse_percent, "");
-            pct_row("spec accept", l.spec_accept_percent, "");
-
+            // gen/prefill/busy/reqs (сглажено: среднее из 5 замеров)
             std::vector<Seg> row;
             row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
             row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s   ", C_TXT});
-            row.push_back({"busy " + (l.busy_slots >= 0 ? std::to_string(l.busy_slots) : std::string("—")) + "   ", C_DIM});
-            row.push_back({"reqs " + (l.requests_processing >= 0 ? std::to_string(l.requests_processing) : std::string("—")), C_DIM});
+            row.push_back({"busy " + (l.busy_slots >= 0 ? fmt1(l.busy_slots) : std::string("—")) + "   ", C_DIM});
+            row.push_back({"reqs " + (l.requests_processing >= 0 ? fmt1(l.requests_processing) : std::string("—")), C_DIM});
             if (!l.metrics_ok) row.push_back({"   (метрики недоступны)", C_WARN});
             box_row(f, row);
         }
@@ -401,15 +403,19 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         box_sep(f);
         box_top(f, "Disks");
         for (const auto& d : c.disks) {
-            std::vector<Seg> row;
+            std::vector<Seg> desc;
             char nm[16]; snprintf(nm, sizeof(nm), "%-8s ", d.name.c_str());
-            row.push_back({nm, C_TXT});
+            desc.push_back({nm, C_TXT});
             char tp[8]; snprintf(tp, sizeof(tp), "%-4s ", d.type.c_str());
-            row.push_back({tp, C_DIM});
-            char sz[16]; snprintf(sz, sizeof(sz), "%6.1f GiB", d.size_gb);
-            row.push_back({sz, C_TXT});
-            if (!d.model.empty()) row.push_back({"  " + d.model, C_DIM});
-            box_row(f, row);
+            desc.push_back({tp, C_DIM});
+            char sz[32];
+            if (d.usage_percent >= 0)
+                snprintf(sz, sizeof(sz), "%7.1f / %7.1f GiB", d.used_gb, d.total_gb);
+            else
+                snprintf(sz, sizeof(sz), "%7.1f GiB", d.size_gb);
+            desc.push_back({sz, C_TXT});
+            if (!d.model.empty()) desc.push_back({"  " + d.model, C_DIM});
+            bar_row(f, desc, d.usage_percent, "%");
         }
     }
 
@@ -418,16 +424,8 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         box_sep(f);
         box_top(f, "Sensors");
         for (const auto& s : c.sensors) {
-            std::vector<Seg> row;
             char nm[48]; snprintf(nm, sizeof(nm), "%-22s ", s.name.c_str());
-            row.push_back({nm, C_TXT});
-            if (s.temp >= 0) {
-                char tb[16]; snprintf(tb, sizeof(tb), "%3.0f°C ", s.temp);
-                row.push_back({tb, pct_attr(s.temp)});
-                row.push_back({"  ", C_TXT});
-                add_bar(row, std::min(s.temp, 100.0), 24);
-            }
-            box_row(f, row);
+            bar_row(f, {{nm, C_TXT}}, s.temp, "°C");
         }
     }
 

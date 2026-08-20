@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <deque>
 #include <cstdint>
 
 struct CPUStats {
@@ -43,7 +44,29 @@ struct DiskStats {
     std::string name;      // "sda", "nvme0n1"
     std::string type;      // "HDD" | "SSD" | "NVMe"
     double size_gb = 0.0;
+    double used_gb = -1.0;  // -1 = не определено (нет ФС на диске)
+    double total_gb = 0.0;
+    double usage_percent = -1.0;
     std::string model;     // из sysfs (может быть пуст)
+};
+
+// Сглаживание метрики: среднее из последних 5 замеров;
+// после того как среднее ушло в 0 — удерживаем последнее ненулевое
+// значение ещё 5 итераций (чтобы показания не «дергались»)
+struct Smooth5 {
+    std::deque<double> w;
+    double last_nz = -1.0;
+    int hold = 0;
+    double update(double v) {
+        w.push_back(v);
+        if (w.size() > 5) w.pop_front();
+        double mean = 0.0;
+        for (double x : w) mean += x;
+        mean /= (double)w.size();
+        if (mean > 0.0) { last_nz = mean; hold = 5; return mean; }
+        if (hold > 0) { hold--; return last_nz; }
+        return 0.0;
+    }
 };
 
 struct NetStats {
@@ -67,8 +90,8 @@ struct LLMStats {
     double prefill_tps = -1.0;   // prompt_tokens_seconds
     double cache_reuse_percent = -1.0;
     double spec_accept_percent = -1.0;
-    int busy_slots = -1;
-    int requests_processing = -1;
+    double busy_slots = -1.0;          // сглажено (среднее из 5)
+    double requests_processing = -1.0; // сглажено (среднее из 5)
     bool metrics_ok = false;
 };
 
@@ -92,6 +115,9 @@ private:
     uint64_t prev_cpu_total_ = 0;
     double prev_net_ts_ = 0.0;
     std::map<std::string, std::pair<uint64_t, uint64_t>> prev_net_;  // iface -> (rx,tx)
+
+    struct LLMSmooth { Smooth5 gen, prefill, busy, reqs; };
+    std::map<int, LLMSmooth> llm_smooth_;  // ключ — порт LLM-сервера
 
     void collect_cpu();
     void collect_ram();

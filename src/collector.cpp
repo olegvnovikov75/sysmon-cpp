@@ -10,6 +10,7 @@
 #include <climits>
 #include <algorithm>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <glob.h>
@@ -388,6 +389,100 @@ void Collector::collect_sensors() {
 
 // ---------- Диски (целые, без партиций) ----------
 
+// mountpoint из /proc/mounts: unescape \NNN (\040 = пробел и т.п.)
+static std::string unescape_mp(const std::string& s) {
+    std::string r;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 3 < s.size()) {
+            char a = s[i+1], b = s[i+2], c = s[i+3];
+            if (a >= '0' && a <= '7' && b >= '0' && b <= '7' && c >= '0' && c <= '7') {
+                r += (char)((a-'0')*64 + (b-'0')*8 + (c-'0'));
+                i += 3; continue;
+            }
+        }
+        r += s[i];
+    }
+    return r;
+}
+
+// pv (sda1 / nvme0n1p2) → целый диск (sda / nvme0n1)
+static std::string pv_to_disk(const std::string& pv) {
+    size_t i = pv.size();
+    while (i > 0 && isdigit((unsigned char)pv[i-1])) i--;
+    if (i > 0 && pv[i-1] == 'p' && pv.rfind("nvme", 0) == 0) i--; // nvme0n1p2 → nvme0n1
+    return pv.substr(0, i);
+}
+
+// Занятость ФС на диске: прямые партиции + LVM (dm → slaves → pv)
+static void disk_usage(const std::string& disk, double& used_gb, double& total_gb) {
+    used_gb = 0; total_gb = 0;
+    // /proc/mounts (свежий, псевдо-ФС отсечены)
+    std::vector<std::pair<std::string, std::string>> mounts;  // (dev, mountpoint)
+    { std::ifstream m("/proc/mounts"); std::string line;
+      while (std::getline(m, line)) {
+          std::istringstream ls(line); std::string dev, mp, fst;
+          if (!(ls >> dev >> mp >> fst)) continue;
+          if (fst == "tmpfs" || fst == "devtmpfs" || fst == "proc" || fst == "procfs" ||
+              fst == "sysfs" || fst == "cgroup" || fst == "cgroup2" || fst == "overlay" ||
+              fst == "squashfs" || fst == "iso9660" || fst == "efivarfs" || fst == "mqueue" ||
+              fst == "debugfs" || fst == "tracefs" || fst == "securityfs" || fst == "pstore" ||
+              fst == "bpf" || fst == "configfs" || fst == "ramfs" || fst == "autofs" ||
+              fst == "hugetlbfs" || fst == "binfmt_misc" ||
+              fst.rfind("fuse", 0) == 0 || fst.rfind("nsfs", 0) == 0) continue;
+          mounts.push_back({dev, unescape_mp(mp)});
+      } }
+    // партиции диска
+    std::vector<std::string> parts;
+    { DIR* d = opendir(("/sys/block/" + disk).c_str());
+      if (d) { struct dirent* e;
+        while ((e = readdir(d)) != NULL) {
+            std::string p = e->d_name;
+            if (p[0] == '.') continue;
+            char path[256];
+            snprintf(path, sizeof(path), "/sys/block/%s/%s/partition", disk.c_str(), p.c_str());
+            struct stat st; if (stat(path, &st) == 0) parts.push_back(p);
+        } closedir(d); } }
+    // LVM-томы, чьи PV на этом диске
+    std::vector<std::string> my_vols;
+    { DIR* db = opendir("/sys/block");
+      if (db) { struct dirent* e;
+        while ((e = readdir(db)) != NULL) {
+            std::string dm = e->d_name;
+            if (dm.rfind("dm-", 0) != 0) continue;
+            char path[256]; std::string vol;
+            snprintf(path, sizeof(path), "/sys/block/%s/dm/name", dm.c_str());
+            { std::ifstream f(path); std::getline(f, vol); vol = trim(vol); }
+            if (vol.empty()) continue;
+            char spath[256]; snprintf(spath, sizeof(spath), "/sys/block/%s/slaves", dm.c_str());
+            DIR* ds = opendir(spath); if (!ds) continue;
+            struct dirent* se; bool mine = false;
+            while ((se = readdir(ds)) != NULL) {
+                std::string pv = se->d_name;
+                if (pv[0] == '.') continue;
+                if (pv_to_disk(pv) == disk) { mine = true; break; }
+            }
+            closedir(ds);
+            if (mine) my_vols.push_back(vol);
+        } closedir(db); } }
+    // суммируем ФС
+    struct statvfs sv;
+    for (const auto& mt : mounts) {
+        const std::string& dev = mt.first;
+        if (dev.rfind("/dev/", 0) != 0) continue;
+        bool hit = false;
+        std::string b = dev.substr(5);
+        for (const auto& p : parts) if (b == p) { hit = true; break; }
+        if (!hit && dev.rfind("/dev/mapper/", 0) == 0) {
+            std::string vol = dev.substr(12);
+            for (const auto& v : my_vols) if (v == vol) { hit = true; break; }
+        }
+        if (hit && statvfs(mt.second.c_str(), &sv) == 0) {
+            total_gb += (double)sv.f_blocks * sv.f_frsize / (1024.0*1024.0*1024.0);
+            used_gb  += (double)(sv.f_blocks - sv.f_bavail) * sv.f_frsize / (1024.0*1024.0*1024.0);
+        }
+    }
+}
+
 void Collector::collect_disks() {
     disks.clear();
     DIR* d = opendir("/sys/block");
@@ -439,6 +534,11 @@ void Collector::collect_disks() {
         }
         if (model.size() > 40) model = model.substr(0, 40) + "…";
         dk.model = model;
+
+        // занятость ФС на диске (прямые партиции + LVM)
+        double ug = 0, tg = 0;
+        disk_usage(name, ug, tg);
+        if (tg > 0) { dk.used_gb = ug; dk.total_gb = tg; dk.usage_percent = 100.0 * ug / tg; }
 
         disks.push_back(dk);
     }
@@ -578,8 +678,9 @@ void Collector::collect_llm() {
                 llm.metrics_ok = true;
                 double v = 0;
                 if (get_metric(response, "llamacpp:n_tokens_max", v)) llm.ctx_used = (int)v;
-                if (get_metric(response, "llamacpp:predicted_tokens_seconds", v)) llm.gen_tps = v;
-                if (get_metric(response, "llamacpp:prompt_tokens_seconds", v)) llm.prefill_tps = v;
+                double gen_raw = 0, prefill_raw = 0, busy_raw = 0, reqs_raw = 0;
+                if (get_metric(response, "llamacpp:predicted_tokens_seconds", v)) gen_raw = v;
+                if (get_metric(response, "llamacpp:prompt_tokens_seconds", v)) prefill_raw = v;
                 double ptot = -1, pcached = -1;
                 if (get_metric(response, "llamacpp:prompt_tokens_total", v)) ptot = v;
                 if (get_metric(response, "llamacpp:prompt_tokens_cached_total", v)) pcached = v;
@@ -590,11 +691,22 @@ void Collector::collect_llm() {
                 if (get_metric(response, "llamacpp:spec_decode_num_draft_tokens_total", v)) sdraft = v;
                 if (sdraft > 0 && sacc >= 0)
                     llm.spec_accept_percent = 100.0 * sacc / sdraft;
-                if (get_metric(response, "llamacpp:n_busy_slots_per_decode", v)) llm.busy_slots = (int)v;
-                if (get_metric(response, "llamacpp:requests_processing", v)) llm.requests_processing = (int)v;
+                if (get_metric(response, "llamacpp:n_busy_slots_per_decode", v)) busy_raw = v;
+                if (get_metric(response, "llamacpp:requests_processing", v)) reqs_raw = v;
+
+                // сглаживание gen/prefill/busy/reqs: среднее из 5 + удержание (Smooth5)
+                auto& sm = llm_smooth_[llm.port];
+                llm.gen_tps = sm.gen.update(gen_raw);
+                llm.prefill_tps = sm.prefill.update(prefill_raw);
+                llm.busy_slots = sm.busy.update(busy_raw);
+                llm.requests_processing = sm.reqs.update(reqs_raw);
 
                 if (llm.ctx_limit > 0 && llm.ctx_used > 0)
                     llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;
+            } else {
+                // метрики недоступны — показываем «—» (сглаживатель не трогаем)
+                llm.gen_tps = -1; llm.prefill_tps = -1;
+                llm.busy_slots = -1; llm.requests_processing = -1;
             }
             curl_easy_cleanup(curl);
         }

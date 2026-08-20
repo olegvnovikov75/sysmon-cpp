@@ -128,12 +128,18 @@ void render_text(const Collector& c) {
         printf("NET:  rx %5.1f MB/s  tx %5.1f MB/s   [%s]\n", rx, tx, list.c_str());
     }
 
-    // DISKS — целые диски
+    // DISKS — целые диски (+ занятость ФС)
     if (!c.disks.empty()) {
         for (const auto& d : c.disks) {
             std::string md = d.model.empty() ? "" : "  " + d.model;  // не .c_str() с временного!
-            printf("  %s%-8s%s %-4s %6.1f GiB%s\n",
-                   col.bold, d.name.c_str(), col.rst, d.type.c_str(), d.size_gb, md.c_str());
+            if (d.usage_percent >= 0)
+                printf("  %s%-8s%s %-4s %7.1f / %7.1f GiB  %s%3.0f%%%s%s\n",
+                       col.bold, d.name.c_str(), col.rst, d.type.c_str(),
+                       d.used_gb, d.total_gb,
+                       color_for_pct(col, d.usage_percent), d.usage_percent, col.rst, md.c_str());
+            else
+                printf("  %s%-8s%s %-4s %6.1f GiB%s\n",
+                       col.bold, d.name.c_str(), col.rst, d.type.c_str(), d.size_gb, md.c_str());
         }
     }
 
@@ -156,8 +162,8 @@ void render_text(const Collector& c) {
                    l.prefill_tps >= 0 ? fmt1(l.prefill_tps).c_str() : "-",
                    l.cache_reuse_percent >= 0 ? fmt1(l.cache_reuse_percent).c_str() : "-",
                    l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent).c_str() : "-",
-                   l.busy_slots >= 0 ? std::to_string(l.busy_slots).c_str() : "-",
-                   l.requests_processing >= 0 ? std::to_string(l.requests_processing).c_str() : "-",
+                   l.busy_slots >= 0 ? fmt1(l.busy_slots).c_str() : "-",
+                   l.requests_processing >= 0 ? fmt1(l.requests_processing).c_str() : "-",
                    l.metrics_ok ? "" : "   (метрики недоступны)");
         }
     }
