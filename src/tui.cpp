@@ -31,8 +31,13 @@ const attr_t C_OK    = COLOR_PAIR(2);
 const attr_t C_HOT   = COLOR_PAIR(4);
 const attr_t C_TRACK = COLOR_PAIR(6); // серый «хвост» прогресс-бара
 
-// плавный градиент синий(0%) -> красный(100%) через 256-цветную палитру
+// Два градиента (256-цвет, 32 шага):
+//  GRAD_BASE — «опасный»: синий(0%) -> красный(100%). Для показателей,
+//    которые при заполнении приведут к поломке: температура, RAM, VRAM, ctx, диски.
+//  GRAD_SAFE — «безопасный»: синий(0%) -> зелёный(100%). Для загрузки,
+//    где 100% — это нормально: CPU, GPU util, cache reuse, spec accept.
 const int GRAD_BASE  = 20;
+const int GRAD_SAFE  = 52;
 const int GRAD_STEPS = 32;
 
 void hsv2rgb(double h, double s, double v, int& r, int& g, int& b) {
@@ -73,26 +78,27 @@ int xterm256_nearest(int r, int g, int b) {
 void init_gradient() {
     for (int i = 0; i < GRAD_STEPS; i++) {
         double t = (double)i / (GRAD_STEPS - 1);
-        double hue = 240.0 * (1.0 - t); // 240 (синий) -> 0 (красный)
         int r, g, b;
-        hsv2rgb(hue, 1.0, 1.0, r, g, b);
+        hsv2rgb(240.0 * (1.0 - t), 1.0, 1.0, r, g, b);   // синий -> красный
         init_pair(GRAD_BASE + i, xterm256_nearest(r, g, b), -1);
+        hsv2rgb(240.0 - 120.0 * t, 1.0, 1.0, r, g, b);   // синий -> зелёный
+        init_pair(GRAD_SAFE + i, xterm256_nearest(r, g, b), -1);
     }
 }
 
-attr_t grad_attr(double r) {
+attr_t grad_attr(double r, bool safe = false) {
     if (r < 0) r = 0;
     if (r > 1) r = 1;
     int idx = (int)(r * (GRAD_STEPS - 1) + 0.5);
     if (idx < 0) idx = 0;
     if (idx >= GRAD_STEPS) idx = GRAD_STEPS - 1;
-    return COLOR_PAIR(GRAD_BASE + idx);
+    return COLOR_PAIR((safe ? GRAD_SAFE : GRAD_BASE) + idx);
 }
 
 // цвет % индикатора = цвет бара на его уровне
-attr_t pct_attr(double pct) {
+attr_t pct_attr(double pct, bool safe = false) {
     if (pct < 0) return C_DIM;
-    return grad_attr(pct / 100.0);
+    return grad_attr(pct / 100.0, safe);
 }
 
 struct Seg { std::string t; attr_t a; };
@@ -147,15 +153,15 @@ std::string repeat(const std::string& s, int n) {
     return r;
 }
 
-// бар: цвет ячейки — градиент по её позиции (лево = синий, право = красный),
-// поле заключено в рамку [ ] — чтобы было видно на фоне
-void add_bar(std::vector<Seg>& row, double pct, int width) {
+// бар: цвет ячейки — градиент по её позиции (лево = синий, право —
+// красный (danger) или зелёный (safe)), поле заключено в рамку [ ]
+void add_bar(std::vector<Seg>& row, double pct, int width, bool safe = false) {
     int filled = (pct < 0) ? 0 : (int)(pct / 100.0 * width + 0.5);
     if (filled > width) filled = width;
     row.push_back({"[", C_TXT});
     for (int i = 0; i < width; i++) {
         double r = width > 1 ? (double)i / (width - 1) : 1.0;
-        row.push_back({i < filled ? "█" : "░", i < filled ? grad_attr(r) : C_TRACK});
+        row.push_back({i < filled ? "█" : "░", i < filled ? grad_attr(r, safe) : C_TRACK});
     }
     row.push_back({"]", C_TXT});
 }
@@ -180,15 +186,19 @@ std::string maybe(double v, const char* unit = "") {
     return b;
 }
 
-std::string uptime_str() {
-    std::ifstream f("/proc/uptime");
-    double s = 0;
-    f >> s;
-    if (!f || s <= 0) return "—";
+std::string uptime_from_s(double s) {
+    if (s <= 0) return "—";
     char b[48];
     snprintf(b, sizeof(b), "%ldd %02ldh %02ldm",
              (long)(s / 86400), (long)((long)s % 86400 / 3600), (long)((long)s % 3600 / 60));
     return b;
+}
+
+std::string uptime_str() {
+    std::ifstream f("/proc/uptime");
+    double s = 0;
+    f >> s;
+    return uptime_from_s(s);
 }
 
 std::string hostname_str() {
@@ -262,38 +272,69 @@ std::vector<Seg> fit_width(std::vector<Seg> segs, int target) {
     return out;
 }
 
-// Строка-бар: описание (слева) + значение (справа, перед баром) + бар у правого края.
+// Строка-бар: описание (слева) + значение (левое выравнивание в 5 кол.) + бар у правого края.
 // Все бары выровнены в одну колонку. value<0 → «—» и пустой бар. unit = "%" или "°C".
-void bar_row(std::vector<std::vector<Seg>>& f, std::vector<Seg> desc, double value, const std::string& unit = "%") {
+// safe=true — «безопасная» гамма (до зелёного): 100% нормально.
+// Длина бара масштабируется с шириной кадра: 24 при 100 колонках, сужается при узком кадре
+// (режим «справа» — каждый кадр получает половину окна).
+static int bar_len(int w) {
+    int n = 24 * w / 100;
+    if (n < 8) n = 8;
+    if (n > 24) n = 24;
+    return n;
+}
+
+void bar_row(std::vector<std::vector<Seg>>& f, std::vector<Seg> desc, double value,
+             const std::string& unit = "%", bool safe = false) {
     std::vector<Seg> line;
     line.push_back({"│ ", C_SEC});
-    int desc_w = W - 35;                       // описание; остальное — значение(5) + пробел + бар(26) + рамка
-    for (auto& s : fit_width(desc, desc_w)) line.push_back(s);
+    int bl = bar_len(W);
+    int desc_w = W - 11 - bl;                  // "│ "(2) + значение(5) + " "(1) + "["(1) + бар + "]"(1) + "│"(1)
+    // desc — на desc_w-1 + обязательный пробел, чтобы не «прилипать» к значению в узком кадре
+    for (auto& s : fit_width(desc, desc_w - 1)) line.push_back(s);
+    line.push_back({" ", C_TXT});
     std::string vs; attr_t va = C_DIM;
-    if (value >= 0) { char b[16]; snprintf(b, sizeof(b), "%.0f%s", value, unit.c_str()); vs = b; va = pct_attr(value); }
+    if (value >= 0) { char b[16]; snprintf(b, sizeof(b), "%.0f%s", value, unit.c_str()); vs = b; va = pct_attr(value, safe); }
     else vs = "—";
     int vw = disp_width(vs);
-    if (vw < 5) vs = std::string(5 - vw, ' ') + vs;   // значение — справа в 5 колонках
+    if (vw < 5) vs = vs + std::string(5 - vw, ' ');   // значение — в столбик по ЛЕВОМУ краю
     line.push_back({vs, va});
     line.push_back({" ", C_TXT});
-    add_bar(line, value, 24);
+    add_bar(line, value, bl, safe);
     line.push_back({"│", C_SEC});
     f.push_back(line);
 }
 
-std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool paused) {
+// Параметры кадра (локальный и remote-кадр строятся одним кодом)
+struct FrameOpts {
+    int width = 100;
+    int interval = 2;
+    bool paused = false;
+    std::string title;      // пуст → "sysmon — <локальный hostname>"
+    std::string status;     // пуст → локальная строка статуса
+    bool footer = true;
+    std::string footer_extra;
+};
+
+std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o) {
+    int savedW = W;
+    W = o.width;
     std::vector<std::vector<Seg>> f;
 
     // title bar
-    box_top(f, "sysmon — " + hostname_str());
+    box_top(f, o.title.empty() ? ("sysmon — " + hostname_str()) : o.title);
 
     // строка статуса
     {
         std::vector<Seg> content;
-        content.push_back({now_str() + "   ", C_TXT});
-        content.push_back({"up " + uptime_str() + "   ", C_DIM});
-        content.push_back({"refresh " + std::to_string(interval) + "s", C_DIM});
-        if (paused) content.push_back({"   PAUSED", C_WARN});
+        if (o.status.empty()) {
+            content.push_back({now_str() + "   ", C_TXT});
+            content.push_back({"up " + uptime_str() + "   ", C_DIM});
+            content.push_back({"refresh " + std::to_string(o.interval) + "s", C_DIM});
+            if (o.paused) content.push_back({"   PAUSED", C_WARN});
+        } else {
+            content.push_back({o.status, C_DIM});
+        }
         box_row(f, content);
     }
 
@@ -306,8 +347,8 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         snprintf(lb, sizeof(lb), "load %.2f %.2f %.2f   %d cores",
                  c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores);
         desc.push_back({lb, C_DIM});
-        bar_row(f, desc, c.cpu.usage, "%");
-        bar_row(f, {}, c.cpu.temperature, "°C");
+        bar_row(f, desc, c.cpu.usage, "%", true);   // загрузка: 100% — нормально (до зелёного)
+        bar_row(f, {}, c.cpu.temperature, "°C");    // температура: 100°C — поломка (до красного)
     }
 
     // RAM
@@ -319,7 +360,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         snprintf(d, sizeof(d), "%6.1f / %6.1f GiB  swap %.2f / %.2f GiB",
                  c.ram.used_gb, c.ram.total_gb, c.ram.swap_used_gb, c.ram.swap_total_gb);
         desc.push_back({d, C_TXT});
-        bar_row(f, desc, c.ram.usage_percent, "%");
+        bar_row(f, desc, c.ram.usage_percent, "%");  // 100% памяти — неисправность
     }
 
     // GPU
@@ -327,55 +368,23 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         const auto& g = c.gpus[i];
         box_sep(f);
         box_top(f, "GPU " + std::to_string(g.index) + " — " + g.name);
-        std::vector<Seg> desc;
         double vram_pct = (g.vram_total_gb > 0) ? 100.0 * g.vram_used_gb / g.vram_total_gb : -1.0;
+        // загрузка GPU: 100% — нормально (до зелёного)
+        std::vector<Seg> desc;
+        if (g.clock_mhz >= 0) desc.push_back({maybe(g.clock_mhz, " MHz"), C_DIM});
+        if (g.power_watts >= 0) desc.push_back({(desc.empty() ? "" : "  ") + maybe(g.power_watts, " W"), C_DIM});
+        bar_row(f, desc, g.utilization, "%", true);
+        // VRAM: 100% — память заполнена (до красного)
         char vb[64];
-        snprintf(vb, sizeof(vb), "vram %5.1f/%5.1f GiB (%3.0f%%)",
-                 g.vram_used_gb, g.vram_total_gb, vram_pct);
-        desc.push_back({vb, C_TXT});
-        if (g.clock_mhz >= 0) desc.push_back({"  " + maybe(g.clock_mhz, " MHz"), C_DIM});
-        if (g.power_watts >= 0) desc.push_back({"  " + maybe(g.power_watts, " W"), C_DIM});
-        bar_row(f, desc, g.utilization, "%");
+        snprintf(vb, sizeof(vb), "vram %5.1f/%5.1f GiB", g.vram_used_gb, g.vram_total_gb);
+        bar_row(f, {{vb, C_TXT}}, vram_pct, "%");
+        // температура
         bar_row(f, {}, g.temperature, "°C");
     }
     if (c.gpus.empty()) {
         box_sep(f);
         box_top(f, "GPU");
         box_row(f, {{"не найдена (нет nvidia-smi и AMD sysfs)", C_DIM}});
-    }
-
-    // LLM (перед Network — по просьбе Шефа)
-    if (c.llms.empty()) {
-        box_sep(f);
-        box_top(f, "LLM");
-        box_row(f, {{"серверы llama-server не найдены", C_DIM}});
-    } else {
-        for (const auto& l : c.llms) {
-            box_sep(f);
-            box_top(f, "LLM : " + std::to_string(l.port) + " — " + l.model_name);
-
-            // ctx — бар (метка с токенами слева, бар справа)
-            {
-                std::vector<Seg> desc;
-                if (l.ctx_limit > 0)
-                    desc.push_back({"ctx " + fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok", C_TXT});
-                else
-                    desc.push_back({"ctx", C_TXT});
-                bar_row(f, desc, l.ctx_percent, "%");
-            }
-            // cache reuse / spec accept — бары
-            bar_row(f, {{"cache reuse", C_TXT}}, l.cache_reuse_percent, "%");
-            bar_row(f, {{"spec accept", C_TXT}}, l.spec_accept_percent, "%");
-
-            // gen/prefill/busy/reqs (сглажено: среднее из 5 замеров)
-            std::vector<Seg> row;
-            row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
-            row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s   ", C_TXT});
-            row.push_back({"busy " + (l.busy_slots >= 0 ? fmt1(l.busy_slots) : std::string("—")) + "   ", C_DIM});
-            row.push_back({"reqs " + (l.requests_processing >= 0 ? fmt1(l.requests_processing) : std::string("—")), C_DIM});
-            if (!l.metrics_ok) row.push_back({"   (метрики недоступны)", C_WARN});
-            box_row(f, row);
-        }
     }
 
     // Network
@@ -409,13 +418,28 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
             char tp[8]; snprintf(tp, sizeof(tp), "%-4s ", d.type.c_str());
             desc.push_back({tp, C_DIM});
             char sz[32];
-            if (d.usage_percent >= 0)
+            if (d.by_partitions)
+                snprintf(sz, sizeof(sz), "%7.1f GiB", d.size_gb);   // ФС не смонтирована — только размер
+            else if (d.usage_percent >= 0)
                 snprintf(sz, sizeof(sz), "%7.1f / %7.1f GiB", d.used_gb, d.total_gb);
             else
                 snprintf(sz, sizeof(sz), "%7.1f GiB", d.size_gb);
             desc.push_back({sz, C_TXT});
+            if (d.by_partitions && !d.fs.empty()) desc.push_back({"  [" + d.fs + "]", C_DIM});
             if (!d.model.empty()) desc.push_back({"  " + d.model, C_DIM});
-            bar_row(f, desc, d.usage_percent, "%");
+            if (d.by_partitions) {
+                // смонтированной ФС нет — точная занятость неизвестна: «unknown» вместо бара
+                std::vector<Seg> line;
+                line.push_back({"│ ", C_SEC});
+                for (auto& s : fit_width(desc, W - 11)) line.push_back(s);
+                int used = 0;
+                for (auto& s : line) used += disp_width(s.t);
+                if (used <= W - 8) line.push_back({std::string(W - used - 8, ' ') + "unknown", C_DIM});
+                line.push_back({"│", C_SEC});
+                f.push_back(line);
+            } else {
+                bar_row(f, desc, d.usage_percent, "%");  // 100% диска — неисправность
+            }
         }
     }
 
@@ -429,15 +453,107 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         }
     }
 
+    // LLM — в самом конце; показываем только если запущен сервер
+    if (!c.llms.empty()) {
+        for (const auto& l : c.llms) {
+            box_sep(f);
+            box_top(f, "LLM : " + std::to_string(l.port) + " — " + l.model_name);
+
+            // ctx — бар (метка с токенами слева, бар справа)
+            {
+                std::vector<Seg> desc;
+                if (l.ctx_limit > 0)
+                    desc.push_back({"ctx " + fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok", C_TXT});
+                else
+                    desc.push_back({"ctx", C_TXT});
+                bar_row(f, desc, l.ctx_percent, "%");  // ctx заполнен — слот занят/поломка
+            }
+            // cache reuse / spec accept — бары (100% — хорошо, до зелёного)
+            bar_row(f, {{"cache reuse", C_TXT}}, l.cache_reuse_percent, "%", true);
+            bar_row(f, {{"spec accept", C_TXT}}, l.spec_accept_percent, "%", true);
+
+            // gen/prefill и busy/reqs — двумя строками (сглажено: среднее из 5 + удержание 60с после нуля)
+            {
+                std::vector<Seg> row;
+                row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
+                row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s", C_TXT});
+                box_row(f, row);
+                row.clear();
+                row.push_back({"busy " + (l.busy_slots >= 0 ? fmt1(l.busy_slots) : std::string("—")) + "   ", C_DIM});
+                row.push_back({"reqs " + (l.requests_processing >= 0 ? fmt1(l.requests_processing) : std::string("—")), C_DIM});
+                if (!l.metrics_ok) row.push_back({"   (метрики недоступны)", C_WARN});
+                box_row(f, row);
+            }
+        }
+    }
+
     box_bottom(f);
 
     // footer
-    {
+    if (o.footer) {
         std::vector<Seg> line;
-        line.push_back({" q — выход   r — пауза/продолжить", C_DIM});
+        line.push_back({" q — выход   r — пауза/продолжить" + o.footer_extra, C_DIM});
         f.push_back(line);
     }
+
+    W = savedW;
     return f;
+}
+
+// remote-кадр: тот же build_frame, но со своим заголовком/статусом, без футера
+std::vector<std::vector<Seg>> remote_frame(const Collector& r, const TuiState& st, int width) {
+    std::string title = "sysmon — remote: " +
+        (r.host.empty() ? st.remote_addr : r.host + " (" + st.remote_addr + ")");
+    if (!st.remote_ok) {
+        std::vector<std::vector<Seg>> f;
+        box_top(f, title);
+        box_row(f, {{"недоступен", C_WARN}});
+        box_bottom(f);
+        return f;
+    }
+    FrameOpts o;
+    o.width = width;
+    o.title = title;
+    o.status = r.ts + "   up " + uptime_from_s(r.uptime_s) + "   (snapshot)";
+    o.footer = false;
+    return build_frame(r, o);
+}
+
+// два кадра в ряд (left + right), строка за строкой; короче — дополнить пробелами
+std::vector<std::vector<Seg>> merge_h(const std::vector<std::vector<Seg>>& a,
+                                      const std::vector<std::vector<Seg>>& b, int width) {
+    std::vector<std::vector<Seg>> out;
+    size_t n = std::max(a.size(), b.size());
+    int half = width / 2;
+    for (size_t y = 0; y < n; y++) {
+        std::vector<Seg> row;
+        if (y < a.size()) {
+            for (const auto& s : a[y]) row.push_back(s);
+            int used = 0;
+            for (const auto& s : row) used += disp_width(s.t);
+            if (used < half) row.push_back({std::string(half - used, ' '), C_TXT});
+        } else {
+            row.push_back({std::string(half, ' '), C_TXT});   // левый кадр короче — правый не «съезжает» влево
+        }
+        if (y < b.size()) {
+            for (const auto& s : b[y]) row.push_back(s);
+            int used = 0;
+            for (const auto& s : row) used += disp_width(s.t);
+            if (used < width) row.push_back({std::string(width - used, ' '), C_TXT});
+        }
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+static const char* mode_name(int mode) {
+    static const char* names[] = {"отключено", "снизу", "справа"};
+    return names[mode];
+}
+
+std::string footer_extra(const TuiState& st) {
+    if (st.remote_addr.empty()) return "";
+    return std::string("   m — remote: ") + mode_name(st.remote_mode);
 }
 
 } // namespace
@@ -460,25 +576,78 @@ void tui_init() {
 }
 
 void tui_shutdown() {
+    // курсор — в угол и скрыть, чтобы не «горел» после выхода
+    move(LINES - 1, COLS - 1);
+    curs_set(0);
     endwin();
 }
 
-bool tui_frame(const Collector& c, int interval_sec, bool& paused) {
-    W = std::min(COLS, 100);
-    if (W < 40) W = COLS;
+bool tui_frame(const Collector& local, const Collector* remote, TuiState& st) {
+    int full = std::min(COLS, 100);
+    if (full < 40) full = COLS;
+    W = full;
 
-    auto frame = build_frame(c, interval_sec, paused);
+    bool show_remote = !st.remote_addr.empty() && st.remote_mode != 0 && remote != nullptr;
+    if (getenv("SYSMON_DEBUG"))
+        fprintf(stderr, "[sysmon] frame: addr='%s' mode=%d remote=%p ok=%d\n",
+                st.remote_addr.c_str(), st.remote_mode, (const void*)remote, (int)st.remote_ok);
+
+    std::vector<std::vector<Seg>> frame;
+    if (show_remote && st.remote_mode == 2) {
+        // справа: два кадра в ряд, каждый — половина ширины (расширяются/сужаются вместе с окном)
+        int half = full / 2;
+        FrameOpts lo;
+        lo.width = half;
+        lo.interval = st.interval;
+        lo.paused = st.paused;
+        lo.footer = false;          // футер рисуется отдельно — на последней строке окна
+        auto lf = build_frame(local, lo);
+        auto rf = remote_frame(*remote, st, half);
+        frame = merge_h(lf, rf, full);
+    } else {
+        FrameOpts lo;
+        lo.width = full;
+        lo.interval = st.interval;
+        lo.paused = st.paused;
+        lo.footer = false;
+        frame = build_frame(local, lo);
+        if (show_remote) {
+            // снизу: remote-кадр под локальным
+            auto rf = remote_frame(*remote, st, full);
+            for (auto& line : rf) frame.push_back(line);
+        }
+    }
+
     erase();
     for (size_t y = 0; y < frame.size() && (int)y < LINES; y++)
         draw_line((int)y, frame[y]);
+    // футер — всегда на последней строке окна (при расширении окна остаётся внизу)
+    if (LINES >= 2)
+        draw_line(LINES - 1, {{std::string(" q — выход   r — пауза/продолжить") + footer_extra(st), C_DIM}});
     refresh();
+    curs_set(0);   // курсор может «проявляться» на некоторых терминалах — прячем каждый кадр
 
-    timeout(interval_sec * 1000);
+    timeout(st.interval * 1000);
     int ch = getch();
     timeout(-1);
+    // ncurses может возвращать кириллицу парой UTF-8-байтов — собираем в символ
+    // (й = D0 B9, к = D0 BA, ь = D1 9F)
+    if (ch == 0xD0 || ch == 0xD1) {
+        timeout(100);          // второй байт UTF-8 приходит мгновенно — не блокируемся навсегда
+        int ch2 = getch();
+        timeout(-1);
+        if (ch == 0xD0 && ch2 == 0xB9) ch = 0x0439;      // й
+        else if (ch == 0xD0 && ch2 == 0xBA) ch = 0x043A; // к
+        else if (ch == 0xD1 && ch2 == 0x9F) ch = 0x044F; // ь
+        else ungetch(ch2);
+    }
     switch (ch) {
-        case 'q': case 'Q': case 27: case 3: return false;
-        case 'r': case 'R': case ' ': paused = !paused; break;
+        case 'q': case 'Q': case 0x0439 /* й = q (рус.) */: case 27: case 3: return false;
+        case 'r': case 'R': case 0x043A /* к = r (рус.) */: case ' ': st.paused = !st.paused; break;
+        case 'm': case 'M': case 0x044F /* ь = m (рус.) */:
+            // справа → снизу → отключено → справа
+            if (!st.remote_addr.empty()) st.remote_mode = (st.remote_mode + 2) % 3;
+            break;
         default: break;
     }
     return true;

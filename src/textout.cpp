@@ -128,11 +128,16 @@ void render_text(const Collector& c) {
         printf("NET:  rx %5.1f MB/s  tx %5.1f MB/s   [%s]\n", rx, tx, list.c_str());
     }
 
-    // DISKS — целые диски (+ занятость ФС)
+    // DISKS — целые диски (+ занятость ФС; без ФС — по партициям)
     if (!c.disks.empty()) {
         for (const auto& d : c.disks) {
             std::string md = d.model.empty() ? "" : "  " + d.model;  // не .c_str() с временного!
-            if (d.usage_percent >= 0)
+            if (d.by_partitions)
+                // ФС не смонтирована — точная занятость неизвестна
+                printf("  %s%-8s%s %-4s %7.1f GiB  [%s]%s\n",
+                       col.bold, d.name.c_str(), col.rst, d.type.c_str(),
+                       d.size_gb, d.fs.c_str(), md.c_str());
+            else if (d.usage_percent >= 0)
                 printf("  %s%-8s%s %-4s %7.1f / %7.1f GiB  %s%3.0f%%%s%s\n",
                        col.bold, d.name.c_str(), col.rst, d.type.c_str(),
                        d.used_gb, d.total_gb,
@@ -143,12 +148,9 @@ void render_text(const Collector& c) {
         }
     }
 
-    hr();
-
-    // LLM
-    if (c.llms.empty()) {
-        printf("  llama: серверы не найдены\n");
-    } else {
+    // LLM — только если запущен сервер
+    if (!c.llms.empty()) {
+        hr();
         for (const auto& l : c.llms) {
             if (l.ctx_percent >= 0)
                 printf("  %sLLM%s  port %5d  %-32s  ctx %3.0f%% (%s/%s tok)\n",

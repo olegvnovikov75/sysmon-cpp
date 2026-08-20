@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <glob.h>
+#include <ctime>
 #include <curl/curl.h>
 
 // ---------- утилиты ----------
@@ -77,6 +78,16 @@ void Collector::collect() {
     collect_disks();
     collect_net();
     collect_llm();
+
+    // метаданные снимка
+    char hb[256] = "";
+    gethostname(hb, sizeof(hb) - 1);
+    host = hb[0] ? hb : "localhost";
+    { std::ifstream f("/proc/uptime"); f >> uptime_s; }
+    time_t t = time(nullptr);
+    char tb[32];
+    strftime(tb, sizeof(tb), "%d.%m.%Y %H:%M:%S", localtime(&t));
+    ts = tb;
 }
 
 // ---------- CPU ----------
@@ -413,9 +424,34 @@ static std::string pv_to_disk(const std::string& pv) {
     return pv.substr(0, i);
 }
 
-// Занятость ФС на диске: прямые партиции + LVM (dm → slaves → pv)
-static void disk_usage(const std::string& disk, double& used_gb, double& total_gb) {
-    used_gb = 0; total_gb = 0;
+// Тип ФС на партиции (blkid; результат кэшируем — ФС за время работы не меняется).
+// blkid не всегда в PATH — пробуем известные пути.
+static std::string part_fs_type(const std::string& part) {
+    static std::map<std::string, std::string> cache;
+    auto it = cache.find(part);
+    if (it != cache.end()) return it->second;
+    std::string type;
+    const char* bins[] = {"/sbin/blkid", "/usr/sbin/blkid", "blkid"};
+    for (int i = 0; i < 3 && type.empty(); i++) {
+        std::string cmd = std::string(bins[i]) + " -s TYPE -o value /dev/" + part + " 2>/dev/null";
+        FILE* f = popen(cmd.c_str(), "r");
+        if (!f) continue;
+        char b[128] = "";
+        if (fgets(b, sizeof(b), f)) type = trim(b);
+        int rc = pclose(f);
+        if (getenv("SYSMON_DEBUG"))
+            fprintf(stderr, "[blkid] %s -> '%s' rc=%d\n", part.c_str(), type.c_str(), rc);
+    }
+    cache[part] = type;
+    return type;
+}
+
+// Занятость ФС на диске: прямые партиции + LVM (dm → slaves → pv).
+// Дополнительно: суммарный размер партиций с распознаваемой ФС (part_fs_gb)
+// и их типы (fs_names) — для дисков без смонтированной ФС.
+static void disk_usage(const std::string& disk, double& used_gb, double& total_gb,
+                       double& part_fs_gb, std::string& fs_names) {
+    used_gb = 0; total_gb = 0; part_fs_gb = 0; fs_names.clear();
     // /proc/mounts (свежий, псевдо-ФС отсечены)
     std::vector<std::pair<std::string, std::string>> mounts;  // (dev, mountpoint)
     { std::ifstream m("/proc/mounts"); std::string line;
@@ -442,6 +478,18 @@ static void disk_usage(const std::string& disk, double& used_gb, double& total_g
             snprintf(path, sizeof(path), "/sys/block/%s/%s/partition", disk.c_str(), p.c_str());
             struct stat st; if (stat(path, &st) == 0) parts.push_back(p);
         } closedir(d); } }
+    // ФС на партициях (blkid): даже не смонтированная ФС занимает место на диске
+    for (const auto& p : parts) {
+        std::string fs = part_fs_type(p);
+        if (fs.empty()) continue;
+        unsigned long long sectors = 0;
+        char path[256];
+        snprintf(path, sizeof(path), "/sys/block/%s/%s/size", disk.c_str(), p.c_str());
+        { std::ifstream f(path); f >> sectors; }
+        part_fs_gb += sectors * 512.0 / (1024.0 * 1024.0 * 1024.0);
+        if (fs_names.find(fs) == std::string::npos)
+            fs_names += (fs_names.empty() ? "" : ",") + fs;
+    }
     // LVM-томы, чьи PV на этом диске
     std::vector<std::string> my_vols;
     { DIR* db = opendir("/sys/block");
@@ -536,9 +584,20 @@ void Collector::collect_disks() {
         dk.model = model;
 
         // занятость ФС на диске (прямые партиции + LVM)
-        double ug = 0, tg = 0;
-        disk_usage(name, ug, tg);
-        if (tg > 0) { dk.used_gb = ug; dk.total_gb = tg; dk.usage_percent = 100.0 * ug / tg; }
+        double ug = 0, tg = 0, pfg = 0;
+        std::string fsn;
+        disk_usage(name, ug, tg, pfg, fsn);
+        if (tg > 0) {
+            dk.used_gb = ug; dk.total_gb = tg; dk.usage_percent = 100.0 * ug / tg;
+        } else if (pfg > 0) {
+            // смонтированной ФС нет — считаем по партициям:
+            // сколько места занято партициями с распознаваемой ФС
+            dk.by_partitions = true;
+            dk.fs = fsn;
+            dk.used_gb = pfg;
+            dk.total_gb = dk.size_gb;
+            dk.usage_percent = dk.size_gb > 0 ? 100.0 * pfg / dk.size_gb : 0.0;
+        }
 
         disks.push_back(dk);
     }
@@ -694,12 +753,14 @@ void Collector::collect_llm() {
                 if (get_metric(response, "llamacpp:n_busy_slots_per_decode", v)) busy_raw = v;
                 if (get_metric(response, "llamacpp:requests_processing", v)) reqs_raw = v;
 
-                // сглаживание gen/prefill/busy/reqs: среднее из 5 + удержание (Smooth5)
+                // сглаживание gen/prefill/busy/reqs: среднее из 5 + удержание 60с после нуля
                 auto& sm = llm_smooth_[llm.port];
-                llm.gen_tps = sm.gen.update(gen_raw);
-                llm.prefill_tps = sm.prefill.update(prefill_raw);
-                llm.busy_slots = sm.busy.update(busy_raw);
-                llm.requests_processing = sm.reqs.update(reqs_raw);
+                double now = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                llm.gen_tps = sm.gen.update(gen_raw, now);
+                llm.prefill_tps = sm.prefill.update(prefill_raw, now);
+                llm.busy_slots = sm.busy.update(busy_raw, now);
+                llm.requests_processing = sm.reqs.update(reqs_raw, now);
 
                 if (llm.ctx_limit > 0 && llm.ctx_used > 0)
                     llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;

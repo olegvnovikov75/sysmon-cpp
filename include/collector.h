@@ -47,24 +47,27 @@ struct DiskStats {
     double used_gb = -1.0;  // -1 = не определено (нет ФС на диске)
     double total_gb = 0.0;
     double usage_percent = -1.0;
+    bool by_partitions = false; // нет смонтированной ФС — занятость по партициям
+    std::string fs;            // типы ФС на партициях (blkid), напр. "ntfs"
     std::string model;     // из sysfs (может быть пуст)
 };
 
 // Сглаживание метрики: среднее из последних 5 замеров;
-// после того как среднее ушло в 0 — удерживаем последнее ненулевое
-// значение ещё 5 итераций (чтобы показания не «дергались»)
+// после того как среднее ушло в 0 — показываем последнее ненулевое
+// значение ещё 60 секунд (нули неприятно видеть и неинформативны)
 struct Smooth5 {
+    static constexpr double HOLD_SEC = 60.0;
     std::deque<double> w;
     double last_nz = -1.0;
-    int hold = 0;
-    double update(double v) {
+    double last_nz_ts = 0.0;   // steady-время последнего ненулевого значения
+    double update(double v, double now) {
         w.push_back(v);
         if (w.size() > 5) w.pop_front();
         double mean = 0.0;
         for (double x : w) mean += x;
         mean /= (double)w.size();
-        if (mean > 0.0) { last_nz = mean; hold = 5; return mean; }
-        if (hold > 0) { hold--; return last_nz; }
+        if (mean > 0.0) { last_nz = mean; last_nz_ts = now; return mean; }
+        if (last_nz > 0.0 && (now - last_nz_ts) < HOLD_SEC) return last_nz;
         return 0.0;
     }
 };
@@ -108,6 +111,11 @@ public:
     std::vector<DiskStats> disks;      // целые диски (без партиций)
     NetStats net;
     std::vector<LLMStats> llms;
+
+    // метаданные снимка (для API/консолидации)
+    std::string host;      // hostname
+    std::string ts;        // время снимка (дд.мм.гггг чч:мм:сс)
+    double uptime_s = 0.0;
 
 private:
     bool first_cpu_ = true;

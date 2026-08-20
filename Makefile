@@ -17,6 +17,9 @@ all: $(TARGET)
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# зависимость на заголовки: изменение .h пересобирает все .o
+$(OBJECTS): $(wildcard $(INCDIR)/*.h)
+
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -I$(INCDIR) -c -o $@ $<
 
