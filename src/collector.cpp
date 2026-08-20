@@ -10,10 +10,22 @@
 #include <climits>
 #include <algorithm>
 #include <sys/stat.h>
+#ifdef _WIN32
+// mingw без statvfs/glob — на Windows эти секции не работают (/sys отсутствует),
+// нужны только для компиляции
+struct statvfs { long f_bsize, f_frsize, f_blocks, f_bfree, f_bavail,
+                   f_files, f_ffree, f_favail; unsigned long f_flag; long f_namemax; };
+inline int statvfs(const char*, struct statvfs*) { return 0; }
+struct glob_t { size_t gl_pathc; char** gl_pathv; };
+#define GLOB_NOSORT 0
+inline int glob(const char*, int, void*, glob_t*) { return 1; } // 1 = нет совпадений
+inline void globfree(glob_t*) {}
+#else
 #include <sys/statvfs.h>
+#include <glob.h>
+#endif
 #include <dirent.h>
 #include <unistd.h>
-#include <glob.h>
 #include <ctime>
 #include <curl/curl.h>
 
@@ -279,7 +291,11 @@ void Collector::collect_gpu() {
     gpus.clear();
 
     // NVIDIA
-    FILE* n = popen("nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.sm,power.draw --format=csv,noheader,nounits 2>/dev/null", "r");
+    std::string nvcmd = "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.sm,power.draw --format=csv,noheader,nounits";
+#ifndef _WIN32
+    nvcmd += " 2>/dev/null";
+#endif
+    FILE* n = popen(nvcmd.c_str(), "r");
     if (n) {
         char buf[512];
         while (fgets(buf, sizeof(buf), n)) {
@@ -681,7 +697,9 @@ void Collector::collect_llm() {
     if (!proc) return;
     struct dirent* entry;
     while ((entry = readdir(proc)) != NULL) {
-        if (entry->d_type != DT_DIR) continue;
+#ifndef _WIN32
+        if (entry->d_type != DT_DIR) continue;   // mingw: d_type не заполняется
+#endif
         char* end;
         long pid = strtol(entry->d_name, &end, 10);
         if (*end != '\0' || pid < 1) continue;

@@ -1,6 +1,9 @@
 #include "tui.h"
 
-#include <ncurses.h>
+#include <ncursesw/ncurses.h>
+#ifdef _WIN32
+#include <winsock2.h>   // gethostname
+#endif
 #include <unistd.h>
 
 #ifndef CURSOR_INVISIBLE
@@ -214,12 +217,22 @@ std::string now_str() {
     return b;
 }
 
-void box_top(std::vector<std::vector<Seg>>& f, const std::string& title) {
+// credit в заголовке кадра — по правому краю, в той же строке (если помещается)
+static const std::string CREDIT = "Designed by Chip and Gayechka (openclaw)";
+
+void box_top(std::vector<std::vector<Seg>>& f, const std::string& title, bool credit = false) {
     std::vector<Seg> line;
     line.push_back({"┌─ ", C_SEC});
     line.push_back({title, C_HDR});
-    int fill = std::max(1, W - 4 - disp_width(title)); // 3 + title + fill + 1 = W
-    line.push_back({repeat("─", fill), C_SEC});
+    int fill = W - 4 - disp_width(title); // 3 + title + fill + 1 = W
+    if (credit && fill >= (int)CREDIT.size() + 1) {
+        fill -= (int)CREDIT.size() + 1;
+        line.push_back({repeat("─", std::max(1, fill)), C_SEC});
+        line.push_back({" ", C_TXT});
+        line.push_back({CREDIT, C_DIM});
+    } else {
+        line.push_back({repeat("─", std::max(1, fill)), C_SEC});
+    }
     line.push_back({"┐", C_SEC});
     f.push_back(line);
 }
@@ -322,7 +335,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
     std::vector<std::vector<Seg>> f;
 
     // title bar
-    box_top(f, o.title.empty() ? ("sysmon — " + hostname_str()) : o.title);
+    box_top(f, o.title.empty() ? ("SYSMON — " + hostname_str()) : o.title, true);
 
     // строка статуса
     {
@@ -502,11 +515,11 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
 
 // remote-кадр: тот же build_frame, но со своим заголовком/статусом, без футера
 std::vector<std::vector<Seg>> remote_frame(const Collector& r, const TuiState& st, int width) {
-    std::string title = "sysmon — remote: " +
+    std::string title = "SYSMON — remote: " +
         (r.host.empty() ? st.remote_addr : r.host + " (" + st.remote_addr + ")");
     if (!st.remote_ok) {
         std::vector<std::vector<Seg>> f;
-        box_top(f, title);
+        box_top(f, title, true);
         box_row(f, {{"недоступен", C_WARN}});
         box_bottom(f);
         return f;

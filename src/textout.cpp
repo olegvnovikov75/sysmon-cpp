@@ -4,6 +4,9 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#ifdef _WIN32
+#include <winsock2.h>   // gethostname
+#endif
 #include <unistd.h>
 
 namespace {

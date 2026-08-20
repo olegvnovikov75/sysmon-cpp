@@ -71,6 +71,37 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 У дисков — занятость файловой системы (used/total GiB, %, бар); у LLM gen/prefill/busy/reqs —
 сглаженные значения (среднее из 5 замеров + удержание после нуля).
 
+## Готовые бинарники (v1.5.0)
+
+| Платформа | Файл | Ссылка |
+|---|---|---|
+| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-ubuntu) |
+| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-windows-console.exe) |
+| Исходники | `sysmon-cpp-v1.5.0-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-cpp-v1.5.0-src.tar.gz) |
+
+Все релизы: [github.com/olegvnovikov75/sysmon-cpp/releases](https://github.com/olegvnovikov75/sysmon-cpp/releases)
+
+### Установка (Ubuntu/Debian)
+
+```bash
+# зависимости (обычно уже стоят): libncursesw6, libtinfo6, libcurl4
+sudo apt install libncursesw6 libtinfo6 libcurl4
+
+curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-ubuntu
+chmod +x ~/sysmon
+sudo mv ~/sysmon /usr/local/bin/sysmon   # или оставить в ~
+sysmon
+```
+
+### Установка (Windows)
+
+1. Скачать `sysmon-windows-console.exe` (статический, зависимостей не требует).
+2. Запустить двойным кликом или из cmd/PowerShell (консоль создаётся сама).
+3. Клавиши: `q`/ESC — выход, `r`/пробел — пауза, `m` — режим второй панели.
+
+Примечание: на Windows секции CPU/RAM/Disks/Sensors читают `/proc` и `/sys`,
+поэтому без WSL они могут быть пустыми; GPU (`nvidia-smi`) и LLM работают.
+
 ## Сборка
 
 Требования: g++ (C++17), make, libncursesw, libcurl.
@@ -171,6 +202,10 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 
 ## Релизы
 
+- **v1.5.0** (20.08.2026) — название **SYSMON** в заголовке + кредит
+  «Designed by Chip and Gayechka (openclaw)» справа (если помещается);
+  готовые бинарники на GitHub: Ubuntu (x86-64) и Windows (console, статический);
+  установка — см. «Готовые бинарники».
 - **v1.4.0** (20.08.2026) — remote по умолчанию справа (две равные панели);
   футер — всегда на последней строке окна; длина баров адаптивная (сужаются с окном);
   LLM gen/prefill и busy/reqs — двумя строками; диски без смонтированной ФС —

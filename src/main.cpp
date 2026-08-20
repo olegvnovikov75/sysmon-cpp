@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <thread>
 #include <chrono>
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 
 #include <curl/curl.h>
 
@@ -37,6 +40,23 @@ static void usage() {
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // консоль: запуск двойным кликом (без консоли) — создать; заголовок окна
+    if (GetStdHandle(STD_OUTPUT_HANDLE) == nullptr) {
+        AllocConsole();
+        SetConsoleTitleA("SYSMON");
+    }
+    // ncurses: без TERM — xterm (в ncurses есть встроенный fallback xterm-new)
+    if (!getenv("TERM")) {
+#ifdef _WIN32
+        _putenv_s("TERM", "xterm");
+#else
+        setenv("TERM", "xterm", 1);
+#endif
+    }
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);   // WSACleanup — автоматически при выходе
+#endif
     bool once = false, hidden = false;
     int interval = 2;
     int port = API_PORT_DEFAULT;

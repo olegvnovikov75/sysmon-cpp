@@ -6,9 +6,14 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#endif
 #include <unistd.h>
 #include <curl/curl.h>
 
@@ -381,7 +386,11 @@ bool ApiServer::start(int port, std::string& err) {
     fd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (fd_ < 0) { err = "socket"; return false; }
     int on = 1;
+#ifdef _WIN32
+    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+#else
     setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+#endif
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -427,7 +436,11 @@ void ApiServer::loop() {
 
 void ApiServer::stop() {
     run_ = false;
+#ifdef _WIN32
+    if (fd_ >= 0) { shutdown(fd_, SD_BOTH); close(fd_); fd_ = -1; }
+#else
     if (fd_ >= 0) { shutdown(fd_, SHUT_RDWR); close(fd_); fd_ = -1; }
+#endif
     if (th_.joinable()) th_.join();
 }
 
