@@ -147,14 +147,17 @@ std::string repeat(const std::string& s, int n) {
     return r;
 }
 
-// бар: цвет ячейки — градиент по её позиции (лево = синий, право = красный)
+// бар: цвет ячейки — градиент по её позиции (лево = синий, право = красный),
+// поле заключено в рамку [ ] — чтобы было видно на фоне
 void add_bar(std::vector<Seg>& row, double pct, int width) {
     int filled = (pct < 0) ? 0 : (int)(pct / 100.0 * width + 0.5);
     if (filled > width) filled = width;
+    row.push_back({"[", C_TXT});
     for (int i = 0; i < width; i++) {
         double r = width > 1 ? (double)i / (width - 1) : 1.0;
         row.push_back({i < filled ? "█" : "░", i < filled ? grad_attr(r) : C_TRACK});
     }
+    row.push_back({"]", C_TXT});
 }
 
 std::string fmt1(double v) {
@@ -197,7 +200,7 @@ std::string hostname_str() {
 std::string now_str() {
     time_t t = time(nullptr);
     char b[32];
-    strftime(b, sizeof(b), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    strftime(b, sizeof(b), "%d.%m.%Y %H:%M:%S", localtime(&t));
     return b;
 }
 
@@ -248,7 +251,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
 
     // CPU
     box_sep(f);
-    box_top(f, "CPU");
+    box_top(f, c.cpu.model.empty() ? "CPU" : "CPU — " + c.cpu.model);
     {
         std::vector<Seg> row;
         char b[16]; snprintf(b, sizeof(b), "%3.0f%% ", c.cpu.usage);
@@ -268,7 +271,6 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
             trow.push_back({tb, pct_attr(c.cpu.temperature)});
             trow.push_back({"  ", C_TXT});
             add_bar(trow, std::min(c.cpu.temperature, 100.0), 24);
-            trow.push_back({"  100°C", C_DIM});
         } else {
             trow.push_back({"temp —", C_DIM});
         }
@@ -320,7 +322,6 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
             trow.push_back({tb, pct_attr(g.temperature)});
             trow.push_back({"  ", C_TXT});
             add_bar(trow, std::min(g.temperature, 100.0), 24);
-            trow.push_back({"  100°C", C_DIM});
         } else {
             trow.push_back({"temp —", C_DIM});
         }
@@ -341,26 +342,37 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         for (const auto& l : c.llms) {
             box_sep(f);
             box_top(f, "LLM : " + std::to_string(l.port) + " — " + l.model_name);
-            std::vector<Seg> row;
-            if (l.ctx_percent >= 0) {
-                row.push_back({"ctx ", C_TXT});
-                char cb[16]; snprintf(cb, sizeof(cb), "%3.0f%% ", l.ctx_percent);
-                row.push_back({cb, pct_attr(l.ctx_percent)});
-                row.push_back({"(" + fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok)   ", C_TXT});
-            } else {
-                row.push_back({"ctx —   ", C_DIM});
-            }
-            row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
-            row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s", C_TXT});
-            box_row(f, row);
 
-            std::vector<Seg> row2;
-            row2.push_back({"cache reuse " + (l.cache_reuse_percent >= 0 ? fmt1(l.cache_reuse_percent) + "%" : std::string("—")) + "   ", C_DIM});
-            row2.push_back({"spec accept " + (l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent) + "%" : std::string("—")) + "   ", C_DIM});
-            row2.push_back({"busy " + (l.busy_slots >= 0 ? std::to_string(l.busy_slots) : std::string("—")) + "   ", C_DIM});
-            row2.push_back({"reqs " + (l.requests_processing >= 0 ? std::to_string(l.requests_processing) : std::string("—")), C_DIM});
-            if (!l.metrics_ok) row2.push_back({"   (метрики недоступны)", C_WARN});
-            box_row(f, row2);
+            // строка «метка + % + бар» — тот же стиль, что CPU/RAM/GPU
+            auto pct_row = [&](const char* label, double pct, const std::string& extra) {
+                std::vector<Seg> r;
+                char lb[16]; snprintf(lb, sizeof(lb), "%-11s ", label);
+                r.push_back({lb, C_TXT});
+                // поле % — всегда 4 символа, чтобы бары выровнялись
+                if (pct >= 0) {
+                    char pb[16]; snprintf(pb, sizeof(pb), "%3.0f%%", pct);
+                    r.push_back({pb, pct_attr(pct)});
+                } else {
+                    r.push_back({"   —", C_DIM});
+                }
+                r.push_back({"  ", C_TXT});
+                add_bar(r, pct, 24);
+                if (!extra.empty()) r.push_back({"  " + extra, C_DIM});
+                box_row(f, r);
+            };
+
+            pct_row("ctx", l.ctx_percent,
+                    (l.ctx_limit > 0) ? fmt_tok(l.ctx_used) + "/" + fmt_tok(l.ctx_limit) + " tok" : "");
+            pct_row("cache reuse", l.cache_reuse_percent, "");
+            pct_row("spec accept", l.spec_accept_percent, "");
+
+            std::vector<Seg> row;
+            row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
+            row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s   ", C_TXT});
+            row.push_back({"busy " + (l.busy_slots >= 0 ? std::to_string(l.busy_slots) : std::string("—")) + "   ", C_DIM});
+            row.push_back({"reqs " + (l.requests_processing >= 0 ? std::to_string(l.requests_processing) : std::string("—")), C_DIM});
+            if (!l.metrics_ok) row.push_back({"   (метрики недоступны)", C_WARN});
+            box_row(f, row);
         }
     }
 
@@ -384,6 +396,23 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
         }
     }
 
+    // Disks — целые диски (HDD/SSD/NVMe)
+    if (!c.disks.empty()) {
+        box_sep(f);
+        box_top(f, "Disks");
+        for (const auto& d : c.disks) {
+            std::vector<Seg> row;
+            char nm[16]; snprintf(nm, sizeof(nm), "%-8s ", d.name.c_str());
+            row.push_back({nm, C_TXT});
+            char tp[8]; snprintf(tp, sizeof(tp), "%-4s ", d.type.c_str());
+            row.push_back({tp, C_DIM});
+            char sz[16]; snprintf(sz, sizeof(sz), "%6.1f GiB", d.size_gb);
+            row.push_back({sz, C_TXT});
+            if (!d.model.empty()) row.push_back({"  " + d.model, C_DIM});
+            box_row(f, row);
+        }
+    }
+
     // Sensors — hwmon-датчики кроме CPU/GPU (NVMe, сетевые PHY/MAC, ...)
     if (!c.sensors.empty()) {
         box_sep(f);
@@ -397,7 +426,6 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, int interval, bool
                 row.push_back({tb, pct_attr(s.temp)});
                 row.push_back({"  ", C_TXT});
                 add_bar(row, std::min(s.temp, 100.0), 24);
-                row.push_back({"  100°C", C_DIM});
             }
             box_row(f, row);
         }
@@ -429,7 +457,7 @@ void tui_init() {
     init_pair(3, COLOR_YELLOW, -1);
     init_pair(4, COLOR_RED, -1);
     init_pair(5, COLOR_CYAN, -1);
-    init_pair(6, COLOR_GRAY, -1);  // серый трек бара (не для текста)
+    init_pair(6, 240, -1);  // серый трек бара (видимый на тёмном фоне)
     init_gradient();
 }
 

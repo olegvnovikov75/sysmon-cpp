@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <climits>
+#include <algorithm>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -72,6 +73,7 @@ void Collector::collect() {
     collect_ram();
     collect_gpu();
     collect_sensors();
+    collect_disks();
     collect_net();
     collect_llm();
 }
@@ -114,6 +116,20 @@ void Collector::collect_cpu() {
 
     cpu.cores = std::thread::hardware_concurrency();
     if (cpu.cores == 0) cpu.cores = 1;
+
+    // модель CPU (из /proc/cpuinfo, читаем один раз)
+    if (cpu.model.empty()) {
+        std::ifstream ci("/proc/cpuinfo");
+        std::string l;
+        while (std::getline(ci, l)) {
+            if (l.find("model name") != std::string::npos) {
+                size_t p = l.find(':');
+                if (p != std::string::npos) cpu.model = trim(l.substr(p + 1));
+                break;
+            }
+        }
+        if (cpu.model.size() > 60) cpu.model = cpu.model.substr(0, 60) + "…";
+    }
 }
 
 double Collector::cpu_temperature() {
@@ -368,6 +384,67 @@ void Collector::collect_sensors() {
         }
     }
     closedir(hw);
+}
+
+// ---------- Диски (целые, без партиций) ----------
+
+void Collector::collect_disks() {
+    disks.clear();
+    DIR* d = opendir("/sys/block");
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        std::string name = e->d_name;
+        // skip "."/".." и виртуальные/оптические
+        if (name[0] == '.' ||
+            name.rfind("loop", 0) == 0 || name.rfind("ram", 0) == 0 ||
+            name.rfind("dm-", 0) == 0 || name.rfind("sr", 0) == 0 ||
+            name.rfind("zram", 0) == 0 || name.rfind("md", 0) == 0) continue;
+        // партиция имеет symlink "partition" → показываем только целые диски
+        char path[512];
+        snprintf(path, sizeof(path), "/sys/block/%s/partition", name.c_str());
+        struct stat st;
+        if (stat(path, &st) == 0) continue;
+
+        DiskStats dk;
+        dk.name = name;
+
+        // размер (секторы по 512 байт); size=0 — мёртвый слот кардридера (SD/MMC и т.п.)
+        unsigned long long sectors = 0;
+        snprintf(path, sizeof(path), "/sys/block/%s/size", name.c_str());
+        { std::ifstream f(path); f >> sectors; }
+        if (sectors == 0) continue;
+        dk.size_gb = sectors * 512.0 / (1024.0 * 1024.0 * 1024.0);
+
+        // тип: NVMe по имени, иначе rotational (1=HDD, 0=SSD)
+        if (name.rfind("nvme", 0) == 0) {
+            dk.type = "NVMe";
+        } else {
+            int rot = -1;
+            snprintf(path, sizeof(path), "/sys/block/%s/queue/rotational", name.c_str());
+            { std::ifstream f(path); f >> rot; }
+            dk.type = (rot == 1) ? "HDD" : "SSD";
+        }
+
+        // модель: SCSI/SAS — device/model; NVMe — /sys/class/nvme/nvmeX/model
+        std::string model;
+        snprintf(path, sizeof(path), "/sys/block/%s/device/model", name.c_str());
+        { std::ifstream f(path); std::getline(f, model); model = trim(model); }
+        if (model.empty() && name.rfind("nvme", 0) == 0) {
+            size_t i = 4; // после "nvme"
+            while (i < name.size() && isdigit((unsigned char)name[i])) i++;
+            std::string ctrl = name.substr(0, i);  // nvme0n1 -> nvme0
+            snprintf(path, sizeof(path), "/sys/class/nvme/%s/model", ctrl.c_str());
+            std::ifstream f(path); std::getline(f, model); model = trim(model);
+        }
+        if (model.size() > 40) model = model.substr(0, 40) + "…";
+        dk.model = model;
+
+        disks.push_back(dk);
+    }
+    closedir(d);
+    std::sort(disks.begin(), disks.end(),
+              [](const DiskStats& a, const DiskStats& b) { return a.name < b.name; });
 }
 
 // ---------- Сеть ----------

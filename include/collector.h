@@ -11,6 +11,7 @@ struct CPUStats {
     double temperature = -1.0;   // -1 = не найдено
     double load1 = 0.0, load5 = 0.0, load15 = 0.0;
     int cores = 0;
+    std::string model;           // из /proc/cpuinfo "model name"
 };
 
 struct RAMStats {
@@ -36,6 +37,13 @@ struct GPUStats {
 struct SensorStats {
     std::string name;   // "nvme Composite", "eno1 PHY Temperature"
     double temp = -1.0;
+};
+
+struct DiskStats {
+    std::string name;      // "sda", "nvme0n1"
+    std::string type;      // "HDD" | "SSD" | "NVMe"
+    double size_gb = 0.0;
+    std::string model;     // из sysfs (может быть пуст)
 };
 
 struct NetStats {
@@ -74,6 +82,7 @@ public:
     RAMStats ram;
     std::vector<GPUStats> gpus;
     std::vector<SensorStats> sensors;  // hwmon-датчики кроме CPU/GPU (NVMe, NIC, ...)
+    std::vector<DiskStats> disks;      // целые диски (без партиций)
     NetStats net;
     std::vector<LLMStats> llms;
 
@@ -88,6 +97,7 @@ private:
     void collect_ram();
     void collect_gpu();
     void collect_sensors();
+    void collect_disks();
     void collect_net();
     void collect_llm();
 

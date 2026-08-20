@@ -67,7 +67,7 @@ void render_text(const Collector& c) {
 
     time_t t = time(nullptr);
     char ts[32];
-    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    strftime(ts, sizeof(ts), "%d.%m.%Y %H:%M:%S", localtime(&t));
 
     hr();
     printf("%s%s%s  |  %s  |  up %s%s\n",
@@ -75,16 +75,17 @@ void render_text(const Collector& c) {
     hr();
 
     // CPU
+    std::string cpu_model = c.cpu.model.empty() ? "" : "   " + c.cpu.model;
     if (c.cpu.temperature >= 0)
-        printf("CPU:  %s%3.0f%%%s  @ %s%.0f°C%s   load: %.2f %.2f %.2f   cores: %d\n",
+        printf("CPU:  %s%3.0f%%%s  @ %s%.0f°C%s   load: %.2f %.2f %.2f   cores: %d%s\n",
                color_for_pct(col, c.cpu.usage), c.cpu.usage, col.rst,
                (c.cpu.temperature > 80 ? col.red : (c.cpu.temperature > 65 ? col.yel : col.grn)),
                c.cpu.temperature, col.rst,
-               c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores);
+               c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores, cpu_model.c_str());
     else
-        printf("CPU:  %s%3.0f%%%s  @ —   load: %.2f %.2f %.2f   cores: %d\n",
+        printf("CPU:  %s%3.0f%%%s  @ —   load: %.2f %.2f %.2f   cores: %d%s\n",
                color_for_pct(col, c.cpu.usage), c.cpu.usage, col.rst,
-               c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores);
+               c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores, cpu_model.c_str());
 
     // RAM
     printf("RAM:  %s%4.1f / %4.1f GiB  (%3.0f%%)%s   Swap: %4.2f / %4.2f GiB\n",
@@ -125,6 +126,15 @@ void render_text(const Collector& c) {
             tx += ifc.tx_mbps;
         }
         printf("NET:  rx %5.1f MB/s  tx %5.1f MB/s   [%s]\n", rx, tx, list.c_str());
+    }
+
+    // DISKS — целые диски
+    if (!c.disks.empty()) {
+        for (const auto& d : c.disks) {
+            std::string md = d.model.empty() ? "" : "  " + d.model;  // не .c_str() с временного!
+            printf("  %s%-8s%s %-4s %6.1f GiB%s\n",
+                   col.bold, d.name.c_str(), col.rst, d.type.c_str(), d.size_gb, md.c_str());
+        }
     }
 
     hr();
