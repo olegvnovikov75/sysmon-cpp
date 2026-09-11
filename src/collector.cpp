@@ -82,6 +82,99 @@ static bool get_metric(const std::string& body, const std::string& name, double&
 
 Collector::Collector() {}
 
+// §6.8c v1.7: парсинг лога llama-server
+struct LogMetrics {
+    int ctx_used = 0;
+    double spec_accept_percent = -1.0;
+    double prefill_tps = -1.0;
+    double gen_tps = -1.0;
+    double cache_reuse_percent = -1.0;
+    bool any = false;
+};
+
+static LogMetrics parse_llm_log(const std::string& log_path, int max_lines = 500) {
+    LogMetrics m;
+    std::ifstream f(log_path);
+    if (!f.is_open()) return m;
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(f, line)) {
+        lines.push_back(line);
+        if (lines.size() > (size_t)max_lines) lines.erase(lines.begin());
+    }
+    for (const auto& l : lines) {
+        size_t p;
+        p = l.find("stop processing: n_tokens = ");
+        if (p != std::string::npos) { m.ctx_used = atoi(l.c_str() + p + 28); m.any = true; }
+        p = l.find("draft acceptance rate = ");
+        if (p != std::string::npos) {
+            std::string rest = l.substr(p + 24);
+            size_t a1 = rest.find("(");
+            size_t a2 = rest.find("accepted");
+            if (a1 != std::string::npos && a2 != std::string::npos) {
+                size_t a3 = rest.find("generated");
+                std::string in_paren = (a3 != std::string::npos) ? rest.substr(a1 + 1, a3 - a1 - 1) : rest.substr(a1 + 1, a2 - a1 - 1);
+                std::vector<int> nums;
+                int cur = 0; bool innum = false;
+                for (char ch : in_paren) {
+                    if (ch >= '0' && ch <= '9') { cur = cur * 10 + (ch - '0'); innum = true; }
+                    else if (innum) { nums.push_back(cur); cur = 0; innum = false; }
+                }
+                if (innum) nums.push_back(cur);
+                if (nums.size() >= 2 && nums[1] > 0)
+                    m.spec_accept_percent = 100.0 * (double)nums[0] / (double)nums[1];
+                m.any = true;
+            }
+        }
+        p = l.find("prompt eval time =");
+        if (p != std::string::npos) {
+            // "prompt eval time =     691.36 ms /    47 tokens" → prefill = 47 / 0.69136 = 67.98 t/s
+            size_t ms1 = l.find("ms /", p);
+            if (ms1 == std::string::npos) ms1 = l.find("ms", p);
+            size_t tok1 = l.find("tokens", p);
+            if (ms1 != std::string::npos && tok1 != std::string::npos) {
+                // число перед "ms" (пропускать пробелы)
+                size_t ms2 = ms1;
+                while (ms2 > 0 && l[ms2 - 1] == ' ') ms2--;
+                while (ms2 > 0 && l[ms2 - 1] >= '0' && l[ms2 - 1] <= '9') ms2--;
+                while (ms2 > 0 && l[ms2 - 1] == '.') ms2--;
+                while (ms2 > 0 && l[ms2 - 1] >= '0' && l[ms2 - 1] <= '9') ms2--;
+                double ms_val = atof(l.substr(ms2, ms1 - ms2).c_str());
+                // число перед "tokens" (пропускать пробелы)
+                size_t tok2 = tok1;
+                while (tok2 > 0 && l[tok2 - 1] == ' ') tok2--;
+                while (tok2 > 0 && l[tok2 - 1] >= '0' && l[tok2 - 1] <= '9') tok2--;
+                double tok_val = atof(l.substr(tok2, tok1 - tok2).c_str());
+                if (ms_val > 0 && tok_val > 0)
+                    m.prefill_tps = tok_val / (ms_val / 1000.0);
+                m.any = true;
+            }
+        }
+        p = l.find("tg = ");
+        if (p != std::string::npos) {
+            size_t c1 = p + 5;
+            size_t c2 = c1;
+            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+            while (c2 < l.size() && l[c2] == '.') c2++;
+            if (c2 > c1) m.gen_tps = atof(l.substr(c1, c2 - c1).c_str());
+            m.any = true;
+        }
+        // cache reuse: "LCP similarity, sim_best = X"
+        p = l.find("LCP similarity, sim_best = ");
+        if (p != std::string::npos) {
+            size_t c1 = p + 28;
+            while (c1 < l.size() && l[c1] == ' ') c1++;
+            size_t c2 = c1;
+            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+            while (c2 < l.size() && l[c2] == '.') c2++;
+            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+            if (c2 > c1) m.cache_reuse_percent = 100.0 * atof(l.substr(c1, c2 - c1).c_str());
+            m.any = true;
+        }
+    }
+    return m;
+}
+
 void Collector::collect() {
     collect_cpu();
     collect_ram();
@@ -738,6 +831,26 @@ void Collector::collect_llm() {
         llm.model_name = model.empty() ? "(без имени)" : model;
         llm.ctx_limit = ctx_limit;
 
+        // v1.7: лог-файл из cmdline: --log / -l / LOG_FILE рядом с -m (basename → cwd процесса)
+        std::string log_arg = arg_value(args, {"--log", "-l", "-lf"});
+        std::string log_path;
+        if (!log_arg.empty()) {
+            log_path = log_arg;
+        } else {
+            // cwd процесса (из /proc/PID/cwd) + serverlog.txt (convention из run.sh)
+            char cwd_buf[512];
+            ssize_t cwd_len = readlink((std::string("/proc/") + std::to_string(pid) + "/cwd").c_str(), cwd_buf, sizeof(cwd_buf) - 1);
+            if (cwd_len > 0) {
+                cwd_buf[cwd_len] = '\0';
+                for (const char* nm : {"serverlog.txt", "server.log", "log.txt"}) {
+                std::string cand = std::string(cwd_buf) + "/" + nm;
+                std::ifstream tf(cand);
+                if (tf.is_open()) { log_path = cand; break; }
+            }
+            }
+        }
+        LogMetrics lm = parse_llm_log(log_path);
+
         CURL* curl = curl_easy_init();
         if (curl) {
             std::string url = "http://127.0.0.1:" + std::to_string(port) + "/metrics";
@@ -786,6 +899,15 @@ void Collector::collect_llm() {
                 llm.requests_processing = sm.reqs.update(reqs_raw, now);
 
                 // §6.8c: ctx_percent — пересчитываем из ctx_used (который держим при 0)
+                // v1.7: log — источник правды (ctx/spec/prefill/gen из лога; /metrics не врёт про busy/reqs)
+                if (lm.any) {
+                    if (lm.ctx_used > 0) llm.ctx_used = lm.ctx_used;
+                    if (lm.spec_accept_percent >= 0) llm.spec_accept_percent = lm.spec_accept_percent;
+                    if (lm.prefill_tps >= 0) llm.prefill_tps = lm.prefill_tps;
+                    if (lm.gen_tps >= 0) llm.gen_tps = lm.gen_tps;
+                    if (lm.cache_reuse_percent >= 0) llm.cache_reuse_percent = lm.cache_reuse_percent;
+                }
+
                 if (llm.ctx_limit > 0)
                     llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;
             } else {
