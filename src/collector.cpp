@@ -754,7 +754,12 @@ void Collector::collect_llm() {
             if (rc == CURLE_OK) {
                 llm.metrics_ok = true;
                 double v = 0;
-                if (get_metric(response, "llamacpp:n_tokens_max", v)) llm.ctx_used = (int)v;
+                if (get_metric(response, "llamacpp:n_tokens_max", v)) {
+                    // §6.8c: CTX — никогда не 0: записываем полученное значение,
+                    // кроме 0 (не ищем сброс слота — просто держим предыдущее при 0)
+                    int vint = (int)v;
+                    if (vint > 0) llm.ctx_used = vint;
+                }
                 double gen_raw = 0, prefill_raw = 0, busy_raw = 0, reqs_raw = 0;
                 if (get_metric(response, "llamacpp:predicted_tokens_seconds", v)) gen_raw = v;
                 if (get_metric(response, "llamacpp:prompt_tokens_seconds", v)) prefill_raw = v;
@@ -780,12 +785,15 @@ void Collector::collect_llm() {
                 llm.busy_slots = sm.busy.update(busy_raw, now);
                 llm.requests_processing = sm.reqs.update(reqs_raw, now);
 
-                if (llm.ctx_limit > 0 && llm.ctx_used > 0)
+                // §6.8c: ctx_percent — пересчитываем из ctx_used (который держим при 0)
+                if (llm.ctx_limit > 0)
                     llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;
             } else {
                 // метрики недоступны — показываем «—» (сглаживатель не трогаем)
                 llm.gen_tps = -1; llm.prefill_tps = -1;
                 llm.busy_slots = -1; llm.requests_processing = -1;
+                // §6.8c: cache_reuse_percent/spec_accept_percent — держим предыдущее
+                // (не обнуляем: статистика за сессию, актуальная цифра ≈ одна для модели)
             }
             curl_easy_cleanup(curl);
         }

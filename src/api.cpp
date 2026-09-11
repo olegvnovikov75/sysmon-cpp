@@ -364,8 +364,11 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.ctx_percent = e.getnum("ctx_percent", -1);
             ls.gen_tps = e.getnum("gen_tps", -1);
             ls.prefill_tps = e.getnum("prefill_tps", -1);
-            ls.cache_reuse_percent = e.getnum("cache_reuse_percent", -1);
-            ls.spec_accept_percent = e.getnum("spec_accept_percent", -1);
+            // §6.8c: держим предыдущее при недоступности (не обнуляем: статистика за сессию)
+            double crp = e.getnum("cache_reuse_percent", -1);
+            ls.cache_reuse_percent = (crp >= 0) ? crp : ls.cache_reuse_percent;
+            double sap = e.getnum("spec_accept_percent", -1);
+            ls.spec_accept_percent = (sap >= 0) ? sap : ls.spec_accept_percent;
             ls.busy_slots = e.getnum("busy_slots", -1);
             ls.requests_processing = e.getnum("requests_processing", -1);
             ls.metrics_ok = e.getnum("metrics_ok", 0) > 0.5;
