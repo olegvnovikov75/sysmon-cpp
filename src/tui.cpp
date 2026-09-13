@@ -535,13 +535,13 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
                 row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s", C_TXT});
                 box_row(f, row);
                 row.clear();
-                char pb[64];   // v1.9b: prefill upl. / gen. (директива Шефа)
+                char pb[64];   // v1.9b: prefill upl. / gen. (директива Шефа 13.09; без лишних пробелов)
                 if (l.prefill_tps >= 0 && l.prefill2_tps > 0)
-                    snprintf(pb, sizeof(pb), "prefill upl. - %7s / gen. - %7s t/s", fmt1(l.prefill_tps).c_str(), fmt1(l.prefill2_tps).c_str());
+                    snprintf(pb, sizeof(pb), "prefill upl.%6s / gen.%6s t/s", fmt1(l.prefill_tps).c_str(), fmt1(l.prefill2_tps).c_str());
                 else if (l.prefill_tps >= 0)
-                    snprintf(pb, sizeof(pb), "prefill upl. - %7s / gen. -    —     t/s", fmt1(l.prefill_tps).c_str());
+                    snprintf(pb, sizeof(pb), "prefill upl.%6s / gen.   —   t/s", fmt1(l.prefill_tps).c_str());
                 else
-                    snprintf(pb, sizeof(pb), "prefill upl. -    —     / gen. -    —     t/s");
+                    snprintf(pb, sizeof(pb), "prefill upl.   —   / gen.   —   t/s");
                 row.push_back({pb, C_TXT});
                 box_row(f, row);
             }
@@ -612,7 +612,18 @@ std::vector<std::vector<Seg>> merge_h(const std::vector<std::vector<Seg>>& a,
             // v1.9b: перенос заголовка — без черты-хвоста, дополняем ПРОБЕЛАМИ до границы
             if (cont_l && used < half) row.push_back({std::string(half - used, ' '), C_TXT});
         } else {
-            row.push_back({std::string(half, ' '), C_TXT});   // левый кадр короче — правый не «съезжает» влево
+            // левый кадр короче по высоте → правая строка не должна «съезжать» влево
+            // v1.9b: если слева title_cont — хвост пробелами; иначе чертой (ровный край)
+            // v1.9b: ─ = U+2500 → UTF-8 E2 94 80 (повтор строки по байтам)
+            {
+                std::string fill;
+                if (cont_l) fill.assign(half, ' ');
+                else {
+                    const char dash[3] = {(char)0xE2, (char)0x94, (char)0x80};   // ─
+                    for (int i = 0; i < half; i++) fill.append(dash, 3);
+                }
+                row.push_back({fill, C_TXT});
+            }
         }
         if (y < b.size()) {
             for (const auto& s : b[y]) row.push_back(s);
