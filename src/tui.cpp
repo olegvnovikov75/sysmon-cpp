@@ -220,21 +220,65 @@ std::string now_str() {
 // credit в заголовке кадра — по правому краю, в той же строке (если помещается)
 static const std::string CREDIT = "Designed by Chip and Gayechka (openclaw)";
 
-void box_top(std::vector<std::vector<Seg>>& f, const std::string& title, bool credit = false) {
-    std::vector<Seg> line;
-    line.push_back({"┌─ ", C_SEC});
-    line.push_back({title, C_HDR});
-    int fill = W - 4 - disp_width(title); // 3 + title + fill + 1 = W
-    if (credit && fill >= (int)CREDIT.size() + 1) {
-        fill -= (int)CREDIT.size() + 1;
-        line.push_back({repeat("─", std::max(1, fill)), C_SEC});
-        line.push_back({" ", C_TXT});
-        line.push_back({CREDIT, C_DIM});
-    } else {
-        line.push_back({repeat("─", std::max(1, fill)), C_SEC});
+// разбить по пробелам (для переноса заголовка)
+static std::vector<std::string> split_ws(const std::string& s) {
+    std::vector<std::string> out;
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        while (i < n && s[i] == ' ') i++;
+        size_t j = i;
+        while (j < n && s[j] != ' ') j++;
+        if (j > i) out.push_back(s.substr(i, j - i));
+        i = j;
     }
-    line.push_back({"┐", C_SEC});
-    f.push_back(line);
+    return out;
+}
+
+// v1.9: заголовок секции с переносом строки — если не влазит между ┌─ и ─┐.
+// credit (только первый кадр): «Designed by ...» справа на ОДНОЙ строке; при переносе
+//credit уходит на отдельную строку под заголовком. Значение W задаёт вызывающий код (локальный/remote).
+void box_top(std::vector<std::vector<Seg>>& f, const std::string& title, bool credit = false) {
+    int inner = W - 4;   // дисплейных колонок между ┌─ и ─┐
+    std::vector<std::string> parts;
+    if (disp_width(title) <= inner)
+        parts.push_back(title);
+    else {
+        // жадный перенос по пробелам: строка ≤ inner (минимум 8 колонок на строку)
+        int lim = std::max(8, inner);   // узкие remote-панели: хотя бы 8 колонок
+        std::string cur;
+        for (const auto& w : split_ws(title)) {
+            if (cur.empty()) { cur = w; }
+            else if (disp_width(cur) + 1 + disp_width(w) <= lim) cur += " " + w;
+            else { parts.push_back(cur); cur = w; }
+        }
+        if (!cur.empty()) parts.push_back(cur);
+    }
+
+    bool credit_inline = false;
+    if (credit && parts.size() == 1)
+        credit_inline = inner - disp_width(parts[0]) >= (int)CREDIT.size() + 2;   // +1 пробел, ≥1 дефис
+
+    for (size_t i = 0; i < parts.size(); i++) {
+        std::vector<Seg> line;
+        if (i == 0)
+            line.push_back({"┌─ ", C_SEC});
+        else
+            line.push_back({repeat("─", 3), C_SEC});   // продолжение под заголовком: ровный край
+        int fill = inner - disp_width(parts[i]);
+        bool credit_here = (i == 0) && !credit_inline;
+        if (credit_inline)
+            fill -= (int)CREDIT.size() + 1;             // место под credit справа
+        line.push_back({parts[i], C_HDR});
+        line.push_back({repeat("─", std::max(1, fill)), C_SEC});
+        if (credit_here && disp_width(parts[0]) <= inner - (int)CREDIT.size() - 3)
+            line.push_back({" " + CREDIT, C_DIM});       // credit отдельной строкой
+        if (i == 0 && credit_inline) {
+            line.push_back({" ", C_TXT});
+            line.push_back({CREDIT, C_DIM});             // credit в одной строке с заголовком
+        }
+        line.push_back({(i == 0 ? std::string("┐") : std::string("─")), C_SEC});
+        f.push_back(line);
+    }
 }
 
 void box_sep(std::vector<std::vector<Seg>>& f) {
@@ -485,12 +529,28 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             bar_row(f, {{"cache reuse", C_TXT}}, l.cache_reuse_percent, "%", true);
             bar_row(f, {{"spec accept", C_TXT}}, l.spec_accept_percent, "%", true);
 
-            // gen/prefill — одной строкой (v1.8: только лог llama-server; busy/reqs удалены)
+            // v1.9: gen/prefill — ДВА значения (загрузка/генерация); prefill = среднее из ≤30 замеров лога
             {
                 std::vector<Seg> row;
-                row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
-                row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s", C_TXT});
+                row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s", C_TXT});
                 box_row(f, row);
+                row.clear();
+                char pb[64];
+                if (l.prefill_tps >= 0 && l.prefill2_tps >= 0)
+                    snprintf(pb, sizeof(pb), "prefill %7s / %7s t/s", fmt1(l.prefill_tps).c_str(), fmt1(l.prefill2_tps).c_str());
+                else if (l.prefill_tps >= 0)
+                    snprintf(pb, sizeof(pb), "prefill %7s t/s", fmt1(l.prefill_tps).c_str());
+                else
+                    snprintf(pb, sizeof(pb), "prefill    —     t/s");
+                row.push_back({pb, C_TXT});
+                box_row(f, row);
+            }
+            // v1.9: последний task: №task/n_tokens/trunc (из лога)
+            if (l.last_task > 0 || l.last_truncated >= 0) {
+                char tb[64];
+                snprintf(tb, sizeof(tb), "last task %d   n_tokens %s   trunc %d",
+                         l.last_task, fmt_tok(l.ctx_used).c_str(), l.last_truncated);
+                box_row(f, {{tb, C_DIM}});
             }
         }
     }

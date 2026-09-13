@@ -141,12 +141,19 @@ int main(int argc, char* argv[]) {
         st.remote_addr = ip;
         Collector c;
         Collector remote;
+        int retries = 0;   // v1.9: при неудачном старте — повтор каждые ~2с до успеха (директива Шефа: данные доступны автоматически)
         while (g_running) {
             if (!st.paused) {
                 c.collect();
                 if (!ip.empty()) {
                     std::string err;
-                    st.remote_ok = fetch_remote(ip, remote, err);
+                    bool ok = fetch_remote(ip, remote, err);
+                    st.remote_ok = ok;
+                    retries = ok ? 0 : retries + 1;
+                    // первый кадр после неудачи: пауза ~2с — и снова пробуем (пока не подключится)
+                    if (!ok && retries == 1) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                    }
                 }
             }
             if (!tui_frame(c, st.remote_addr.empty() ? nullptr : &remote, st)) break;

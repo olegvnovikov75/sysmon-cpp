@@ -125,7 +125,10 @@ std::string collector_to_json(const Collector& c) {
         j += "\"gen_tps\":" + jnum(l.gen_tps) + ",";
         j += "\"prefill_tps\":" + jnum(l.prefill_tps) + ",";
         j += "\"cache_reuse_percent\":" + jnum(l.cache_reuse_percent) + ",";
-        j += "\"spec_accept_percent\":" + jnum(l.spec_accept_percent) + "}";
+        j += "\"spec_accept_percent\":" + jnum(l.spec_accept_percent) + ",";
+        j += "\"prefill2_tps\":" + jnum(l.prefill2_tps) + ",";       // v1.9: чистая загрузка prompt
+        j += "\"last_task\":" + std::to_string(l.last_task) + ",";   // v1.9: №task из лога
+        j += "\"last_truncated\":" + std::to_string(l.last_truncated) + "}";
     }
     j += "]}";
     return j;
@@ -366,6 +369,10 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.cache_reuse_percent = (crp >= 0) ? crp : ls.cache_reuse_percent;
             double sap = e.getnum("spec_accept_percent", -1);
             ls.spec_accept_percent = (sap >= 0) ? sap : ls.spec_accept_percent;
+            double p2 = e.getnum("prefill2_tps", -1);                 // v1.9
+            ls.prefill2_tps = (p2 > 0) ? p2 : ls.prefill2_tps;        // держим предыдущее при недоступности
+            ls.last_task = (int)e.getnum("last_task", 0);
+            ls.last_truncated = (int)e.getnum("last_truncated", -1);   // v1.9: №task/trunc из лога
             out.llms.push_back(ls);
         }
 

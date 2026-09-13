@@ -95,6 +95,9 @@ struct LLMStats {
     double prefill_tps = -1.0;   // лог: 'prompt eval time = A ms / B tokens' → B/A*1000
     double cache_reuse_percent = -1.0;  // лог: 'LCP similarity, sim_best = X'
     double spec_accept_percent = -1.0;  // лог: 'draft acceptance rate = ... (Y / Z)'
+    double prefill2_tps = -1.0;         // v1.9: prefill из 'prompt eval time' (загрузка), отдельно от прогресса
+    int last_task = 0;                  // v1.9: №task из 'stop processing' (последний в окне лога)
+    int last_truncated = -1;            // v1.9: truncated из 'stop processing'
 };
 
 class Collector {

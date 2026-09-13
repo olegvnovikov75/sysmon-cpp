@@ -54,12 +54,19 @@ static bool read_first_line(const std::string& path, std::string& out) {
 Collector::Collector() {}
 
 // §6.8c v1.7: парсинг лога llama-server
+// v1.9: prefill — два источника:
+//  - 'prompt processing, ... t = X s / Y tokens per second' → prefill_samples (сглаживается средним ≤30 замеров)
+//  - 'prompt eval time = A ms / B tokens' → prefill2_tps_v (итог загрузки prompt — чистая цифра, без смешивания)
 struct LogMetrics {
     int ctx_used = 0;
     double spec_accept_percent = -1.0;
-    double prefill_tps = -1.0;
+    double prefill_tps = -1.0;      // из 'prompt processing' (Collector пересчитает среднее ≤30 замеров)
+    std::vector<double> prefill_samples;   // сырые значения за окно лога
+    double prefill2_tps_v = -1.0;  // из 'prompt eval time'
     double gen_tps = -1.0;
     double cache_reuse_percent = -1.0;
+    int last_task = 0;              // из 'stop processing' (последний в окне лога)
+    int last_truncated = -1;
     bool any = false;
 };
 
@@ -75,8 +82,20 @@ static LogMetrics parse_llm_log(const std::string& log_path, int max_lines = 500
     }
     for (const auto& l : lines) {
         size_t p;
+        // v1.9: stop processing — task №, n_tokens (ctx), truncated
         p = l.find("stop processing: n_tokens = ");
-        if (p != std::string::npos) { m.ctx_used = atoi(l.c_str() + p + 28); m.any = true; }
+        if (p != std::string::npos) {
+            m.ctx_used = atoi(l.c_str() + p + 28);
+            // "... | task NNNN | stop processing" — ищем "task " до p
+            size_t t1 = l.rfind("task ", p);
+            if (t1 != std::string::npos && p - t1 < 40) {
+                int tv = atoi(l.c_str() + t1 + 5);
+                if (tv > 0) m.last_task = tv;   // последнее в окне = последний завершённый task
+            }
+            size_t tr1 = l.find("truncated = ", p);
+            if (tr1 != std::string::npos) m.last_truncated = atoi(l.c_str() + tr1 + 11);
+            m.any = true;
+        }
         p = l.find("draft acceptance rate = ");
         if (p != std::string::npos) {
             std::string rest = l.substr(p + 24);
@@ -97,6 +116,25 @@ static LogMetrics parse_llm_log(const std::string& log_path, int max_lines = 500
                 m.any = true;
             }
         }
+        // v1.9: prefill из 'prompt processing, n_tokens = N, progress = P, t = X s / Y tokens per second'
+        p = l.find("prompt processing,");
+        if (p != std::string::npos) {
+            size_t toks_per_s = l.find("tokens per second", p);
+            if (toks_per_s != std::string::npos) {
+                // число перед " tokens per second" — идём назад от него
+                size_t c1 = toks_per_s;
+                while (c1 > 0 && l[c1 - 1] == ' ') c1--;
+                while (c1 > 0 && l[c1 - 1] >= '0' && l[c1 - 1] <= '9') c1--;
+                while (c1 > 0 && l[c1 - 1] == '.') c1--;
+                while (c1 > 0 && l[c1 - 1] >= '0' && l[c1 - 1] <= '9') c1--;
+                double v = atof(l.substr(c1, toks_per_s - c1).c_str());
+                if (v > 0) {
+                    m.prefill_samples.push_back(v);
+                    m.any = true;
+                }
+            }
+        }
+
         p = l.find("prompt eval time =");
         if (p != std::string::npos) {
             // "prompt eval time =     691.36 ms /    47 tokens" → prefill = 47 / 0.69136 = 67.98 t/s
@@ -116,8 +154,10 @@ static LogMetrics parse_llm_log(const std::string& log_path, int max_lines = 500
                 while (tok2 > 0 && l[tok2 - 1] == ' ') tok2--;
                 while (tok2 > 0 && l[tok2 - 1] >= '0' && l[tok2 - 1] <= '9') tok2--;
                 double tok_val = atof(l.substr(tok2, tok1 - tok2).c_str());
-                if (ms_val > 0 && tok_val > 0)
-                    m.prefill_tps = tok_val / (ms_val / 1000.0);
+                if (ms_val > 0 && tok_val > 0) {
+                    // v1.9: prefill2 — ЧИСТАЯ скорость загрузки prompt (отдельно от прогресса)
+                    m.prefill2_tps_v = tok_val / (ms_val / 1000.0);
+                }
                 m.any = true;
             }
         }
@@ -827,13 +867,23 @@ void Collector::collect_llm() {
         if (!lm.any) {
             llm.gen_tps = -1;          // нет записей в окне лога → «—»
             llm.prefill_tps = -1;
+            llm.prefill2_tps = -1;
             // ctx_used / cache_reuse_percent / spec_accept_percent — держим предыдущее
         } else {
             if (lm.ctx_used > 0) llm.ctx_used = lm.ctx_used;   // CTX никогда не 0
             if (lm.spec_accept_percent >= 0) llm.spec_accept_percent = lm.spec_accept_percent;
-            if (lm.prefill_tps >= 0) llm.prefill_tps = lm.prefill_tps;
+            if (!lm.prefill_samples.empty()) {
+                // v1.9: prefill = среднее из последних ≤30 замеров лога (директива Шефа)
+                double sum = 0; size_t n = std::min<size_t>(lm.prefill_samples.size(), 30);
+                for (size_t i = lm.prefill_samples.size() - n; i < lm.prefill_samples.size(); i++)
+                    sum += lm.prefill_samples[i];
+                llm.prefill_tps = sum / (double)n;
+            }
             if (lm.gen_tps >= 0) llm.gen_tps = lm.gen_tps;
             if (lm.cache_reuse_percent >= 0) llm.cache_reuse_percent = lm.cache_reuse_percent;
+            if (lm.prefill2_tps_v > 0) llm.prefill2_tps = lm.prefill2_tps_v;   // чистая загрузка prompt
+            if (lm.last_task > 0) llm.last_task = lm.last_task;
+            if (lm.last_truncated >= 0) llm.last_truncated = lm.last_truncated;
         }
 
         if (llm.ctx_limit > 0)
