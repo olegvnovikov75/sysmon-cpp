@@ -91,7 +91,7 @@ struct LLMStats {
     int ctx_limit = 0;           // из cmdline: -c / --ctx-size (0 = не задано)
     int ctx_used = 0;            // лог: 'stop processing: n_tokens = X'
     double ctx_percent = -1.0;   // -1 = нельзя посчитать
-    double gen_tps = -1.0;       // лог: 'tg = X t/s'
+    double gen_tps = -1.0;       // v1.9c: decode gen (лог: 'tg = X t/s')
     double prefill_tps = -1.0;   // лог: 'prompt eval time = A ms / B tokens' → B/A*1000
     double cache_reuse_percent = -1.0;  // лог: 'LCP similarity, sim_best = X'
     double spec_accept_percent = -1.0;  // лог: 'draft acceptance rate = ... (Y / Z)'

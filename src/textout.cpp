@@ -164,7 +164,10 @@ void render_text(const Collector& c) {
                        col.bold, col.rst, l.port, l.model_name.c_str());
             // v1.9: prefill — два значения (прогресс / чистая загрузка prompt); task/n_tokens/trunc из лога
             // v1.9b: prefill upl./gen. (директива Шефа 13.09; без лишних пробелов)
-            printf("       gen %6s tok/s   prefill upl.%7s / gen.%7s t/s   cache reuse %3s%%   spec accept %3s%%\n",
+            // v1.9c: decode gen (из лога)
+            if (l.gen_tps > 0) printf("       decode gen.%6s tok/s", fmt1(l.gen_tps).c_str());
+            else printf("       decode gen.   —   tok/s");
+            printf("   prefill upl.%7s / gen.%7s t/s   cache reuse %3s%%   spec accept %3s%%%s\n",
                    l.gen_tps >= 0 ? fmt1(l.gen_tps).c_str() : "-",
                    l.prefill_tps >= 0 ? fmt1(l.prefill_tps).c_str() : "-",
                    l.prefill2_tps > 0 ? fmt1(l.prefill2_tps).c_str() : "-",

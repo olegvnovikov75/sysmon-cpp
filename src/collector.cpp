@@ -63,7 +63,7 @@ struct LogMetrics {
     double prefill_tps = -1.0;      // из 'prompt processing' (Collector пересчитает среднее ≤30 замеров)
     std::vector<double> prefill_samples;   // сырые значения за окно лога
     double prefill2_tps_v = -1.0;  // из 'prompt eval time'
-    double gen_tps = -1.0;
+    double gen_tps_v = -1.0;   // v1.9c: из 'tg =' (Collector пересчитает)
     double cache_reuse_percent = -1.0;
     int last_task = 0;              // из 'stop processing' (последний в окне лога)
     int last_truncated = -1;
@@ -161,13 +161,19 @@ static LogMetrics parse_llm_log(const std::string& log_path, int max_lines = 500
                 m.any = true;
             }
         }
+        // v1.9c: decode gen — 'tg =' (последнее в окне лога)
         p = l.find("tg = ");
         if (p != std::string::npos) {
             size_t c1 = p + 5;
+            while (c1 < l.size() && l[c1] == ' ') c1++;   // пропустить пробелы
+            // v1.9c: число после "tg = " — идём до пробела/конца строки, потом atof
             size_t c2 = c1;
             while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
-            while (c2 < l.size() && l[c2] == '.') c2++;
-            if (c2 > c1) m.gen_tps = atof(l.substr(c1, c2 - c1).c_str());
+            if (l[c2] == '.') {
+                c2++;   // точка
+                while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+            }
+            if (c2 > c1) m.gen_tps_v = atof(l.substr(c1, c2 - c1).c_str());
             m.any = true;
         }
         // cache reuse: "LCP similarity, sim_best = X"
@@ -879,7 +885,8 @@ void Collector::collect_llm() {
                     sum += lm.prefill_samples[i];
                 llm.prefill_tps = sum / (double)n;
             }
-            if (lm.gen_tps >= 0) llm.gen_tps = lm.gen_tps;
+            // v1.9c: decode gen — держим предыдущее при недоступности
+            if (lm.gen_tps_v > 0) llm.gen_tps = lm.gen_tps_v;
             if (lm.cache_reuse_percent >= 0) llm.cache_reuse_percent = lm.cache_reuse_percent;
             if (lm.prefill2_tps_v > 0) llm.prefill2_tps = lm.prefill2_tps_v;   // чистая загрузка prompt
             if (lm.last_task > 0) llm.last_task = lm.last_task;

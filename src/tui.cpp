@@ -529,10 +529,13 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             bar_row(f, {{"cache reuse", C_TXT}}, l.cache_reuse_percent, "%", true);
             bar_row(f, {{"spec accept", C_TXT}}, l.spec_accept_percent, "%", true);
 
-            // v1.9: gen/prefill — ДВА значения (загрузка/генерация); prefill = среднее из ≤30 замеров лога
+            // v1.9c: decode gen / prefill — ДВА значения
             {
                 std::vector<Seg> row;
-                row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s", C_TXT});
+                char gb[48];   // decode gen (из лога)
+                if (l.gen_tps > 0) snprintf(gb, sizeof(gb), "decode gen.%6s t/s", fmt1(l.gen_tps).c_str());
+                else snprintf(gb, sizeof(gb), "decode gen.   —   t/s");
+                row.push_back({gb, C_TXT});
                 box_row(f, row);
                 row.clear();
                 char pb[64];   // v1.9b: prefill upl. / gen. (директива Шефа 13.09; без лишних пробелов)
