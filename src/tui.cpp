@@ -535,13 +535,13 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
                 row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s", C_TXT});
                 box_row(f, row);
                 row.clear();
-                char pb[64];
-                if (l.prefill_tps >= 0 && l.prefill2_tps >= 0)
-                    snprintf(pb, sizeof(pb), "prefill %7s / %7s t/s", fmt1(l.prefill_tps).c_str(), fmt1(l.prefill2_tps).c_str());
+                char pb[64];   // v1.9b: prefill upl. / gen. (директива Шефа)
+                if (l.prefill_tps >= 0 && l.prefill2_tps > 0)
+                    snprintf(pb, sizeof(pb), "prefill upl. - %7s / gen. - %7s t/s", fmt1(l.prefill_tps).c_str(), fmt1(l.prefill2_tps).c_str());
                 else if (l.prefill_tps >= 0)
-                    snprintf(pb, sizeof(pb), "prefill %7s t/s", fmt1(l.prefill_tps).c_str());
+                    snprintf(pb, sizeof(pb), "prefill upl. - %7s / gen. -    —     t/s", fmt1(l.prefill_tps).c_str());
                 else
-                    snprintf(pb, sizeof(pb), "prefill    —     t/s");
+                    snprintf(pb, sizeof(pb), "prefill upl. -    —     / gen. -    —     t/s");
                 row.push_back({pb, C_TXT});
                 box_row(f, row);
             }
@@ -588,18 +588,29 @@ std::vector<std::vector<Seg>> remote_frame(const Collector& r, const TuiState& s
 }
 
 // два кадра в ряд (left + right), строка за строкой; короче — дополнить пробелами
+// v1.9b: merge_h — два кадра в ряд; строки с длинным заголовком (перенос) без черты-заполнителя:
+// левый и правый куски соединяются ПРОБЕЛАМИ, хвост строки тоже пробелами (директива Шефа 13.09)
 std::vector<std::vector<Seg>> merge_h(const std::vector<std::vector<Seg>>& a,
                                       const std::vector<std::vector<Seg>>& b, int width) {
+    // строка «продолжение заголовка»: ─── (3× U+2500, UTF-8 E2 94 80) + текст + хвост
+    auto title_cont = [&](const std::vector<Seg>& r) -> bool {
+        if (r.size() < 2) return false;
+        const std::string& s0 = r[0].t;
+        return s0.size() == 9 &&
+               (unsigned char)s0[0] == 0xE2 && (unsigned char)s0[1] == 0x94;
+    };
     std::vector<std::vector<Seg>> out;
     size_t n = std::max(a.size(), b.size());
     int half = width / 2;
     for (size_t y = 0; y < n; y++) {
         std::vector<Seg> row;
+        bool cont_l = y < a.size() && title_cont(a[y]);   // левая строка — перенос заголовка
         if (y < a.size()) {
             for (const auto& s : a[y]) row.push_back(s);
             int used = 0;
             for (const auto& s : row) used += disp_width(s.t);
-            if (used < half) row.push_back({std::string(half - used, ' '), C_TXT});
+            // v1.9b: перенос заголовка — без черты-хвоста, дополняем ПРОБЕЛАМИ до границы
+            if (cont_l && used < half) row.push_back({std::string(half - used, ' '), C_TXT});
         } else {
             row.push_back({std::string(half, ' '), C_TXT});   // левый кадр короче — правый не «съезжает» влево
         }
@@ -607,7 +618,9 @@ std::vector<std::vector<Seg>> merge_h(const std::vector<std::vector<Seg>>& a,
             for (const auto& s : b[y]) row.push_back(s);
             int used = 0;
             for (const auto& s : row) used += disp_width(s.t);
-            if (used < width) row.push_back({std::string(width - used, ' '), C_TXT});
+            // v1.9b: правая строка — перенос заголовка → хвост тоже пробелами
+            bool cont_r = title_cont(b[y]);
+            if ((cont_l || cont_r) && used < width) row.push_back({std::string(width - used, ' '), C_TXT});
         }
         out.push_back(std::move(row));
     }

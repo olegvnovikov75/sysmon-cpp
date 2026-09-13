@@ -163,7 +163,8 @@ void render_text(const Collector& c) {
                 printf("  %sLLM%s  port %5d  %-32s  ctx —\n",
                        col.bold, col.rst, l.port, l.model_name.c_str());
             // v1.9: prefill — два значения (прогресс / чистая загрузка prompt); task/n_tokens/trunc из лога
-            printf("       gen %6s tok/s   prefill %8s / %8s t/s   cache reuse %3s%%   spec accept %3s%%\n",
+            // v1.9b: prefill upl. / gen. (директива Шефа 13.09)
+            printf("       gen %6s tok/s   prefill upl. - %8s / gen. - %8s t/s   cache reuse %3s%%   spec accept %3s%%\n",
                    l.gen_tps >= 0 ? fmt1(l.gen_tps).c_str() : "-",
                    l.prefill_tps >= 0 ? fmt1(l.prefill_tps).c_str() : "-",
                    l.prefill2_tps > 0 ? fmt1(l.prefill2_tps).c_str() : "-",
