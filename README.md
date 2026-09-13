@@ -31,7 +31,7 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 │ ctx 209k/262k tok                                                  80% [███████████████████░░░░░]│
 │ cache reuse                                                        95% [███████████████████████░]│
 │ spec accept                                                        82% [████████████████████░░░░]│
-│ gen 0.0 t/s   prefill 0.0 t/s   busy 1.0   reqs 0.0                                              │
+│ gen 34.2 t/s   prefill 12.0 t/s                                                                 │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────┤
 ┌─ Network─────────────────────────────────────────────────────────────────────────────────────────┐
 │ enp5s0     ↓     0.0 MB/s  ↑     0.0 MB/s                                                        │
@@ -58,7 +58,7 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 | **CPU** | модель (в заголовке), загрузка % (бар), температура (бар), load 1/5/15, ядра | `/proc/cpuinfo`, `/proc/stat`, `/proc/loadavg`, thermal_zone / hwmon (k10temp, coretemp) / `sensors` |
 | **RAM** | занято/всего GiB, %, swap | `/proc/meminfo` |
 | **GPU** (NVIDIA + AMD, все карты) | util % (бар), VRAM GiB, температура (бар), clock MHz, power W | `nvidia-smi` (CSV), `/sys/class/drm/*/device` + hwmon (amdgpu) |
-| **LLM** (все llama-server) | порт, модель, ctx % (бар, занято/лимит tok), cache reuse % (бар), spec accept % (бар), gen tok/s, prefill tok/s, busy slots, requests (gen/prefill/busy/reqs — **сглажено**: среднее из 5 замеров) | `/proc/*/cmdline` + один GET `/metrics` на сервер |
+| **LLM** (все llama-server) | порт, модель, ctx % (бар, занято/лимит tok), cache reuse % (бар), spec accept % (бар), gen tok/s, prefill tok/s — **всё из лога llama-server** (serverlog.txt, скользящее окно 500 строк; единственный источник данных, v1.8) | `/proc/*/cmdline` + парсинг `serverlog.txt` |
 | **Network** | rx/tx MB/s по каждому активному интерфейсу | `/sys/class/net/*/statistics` (дельты) |
 | **Disks** | целые диски: тип (HDD/SSD/NVMe), размер GiB, модель, **занятость ФС** (used/total GiB, %, бар) | `/sys/block/*` (size, queue/rotational, device/model), `/sys/class/nvme/*/model`, `/proc/mounts` + `statvfs` (занятость, вкл. LVM) |
 | **Sensors** | температуры hwmon-датчиков с барами (NVMe, сетевые PHY/MAC и др.) | `/sys/class/hwmon/*` |
@@ -68,7 +68,7 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 цвет цифры % совпадает с цветом бара на её уровне. Поле бара заключено в рамку `[ ]`,
 пустые ячейки — видимый серый трек. **Все бары выровнены в одну колонку у правого края**
 (значение — справа перед баром), чтобы их было удобно сравнивать. Дата в формате `дд.мм.гггг`.
-У дисков — занятость файловой системы (used/total GiB, %, бар); у LLM gen/prefill/busy/reqs —
+У дисков — занятость файловой системы (used/total GiB, %, бар); у LLM gen/prefill —
 сглаженные значения (среднее из 5 замеров + удержание после нуля).
 
 ## Готовые бинарники (v1.5.0)
@@ -78,6 +78,8 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 | Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-ubuntu) |
 | Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-windows-console.exe) |
 | Исходники | `sysmon-cpp-v1.5.0-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-cpp-v1.5.0-src.tar.gz) |
+
+Примечание: в v1.6.0/v1.7.0 обновлён только `sysmon-ubuntu` (Linux); Windows-бинарник будет пересобран при установке cross-libcurl.
 
 Все релизы: [github.com/olegvnovikov75/sysmon-cpp/releases](https://github.com/olegvnovikov75/sysmon-cpp/releases)
 
@@ -125,6 +127,7 @@ sysmon                 # TUI, обновление каждые 2 сек
 sysmon -w 5            # TUI, каждые 5 сек
 sysmon -1              # один текстовый снимок (для пайпа/логов/скриптов)
 sysmon -ip 192.168.1.40   # TUI + данные другого ПК (его sysmon -h), по умолчанию — справа
+sysmon -ip 192.168.1.40:18081   # ...с явным портом (host:port)
 sysmon -ip 192.168.1.40 -p 18081   # ...на нестандартном порту
 sysmon -h              # скрытый режим: JSON-сервер на 0.0.0.0:18080 (GET /)
 sysmon -h -p 18081     # ...на другом порту
@@ -150,14 +153,14 @@ RAM:  12.4 / 31.2 GiB  ( 40%)   Swap: 0.00 / 8.00 GiB
   sda      HDD  1863.0 GiB  WDC WD20PURZ-85A
   sdd      HDD   71.6 /   422.1 GiB    17%  WDC WD5000AAKX-0
   LLM  port  1234  qwen38-27b-uncensored   ctx  87% (229k/262k tok)
-       gen   34.2 tok/s   prefill   12.0 tok/s   cache reuse  95%   spec accept  82%   busy slots 1.0   reqs 0.0
+       gen   34.2 tok/s   prefill   12.0 tok/s   cache reuse  95%   spec accept  82%
 ```
 
 ## Как устроено
 
 ```
 include/collector.h   структуры данных (CPU/RAM/GPU/Sensor/Disk/Net/LLM) + класс Collector
-src/collector.cpp     сбор данных: /proc, /sys, nvidia-smi, /proc/*/cmdline + curl /metrics
+src/collector.cpp     сбор данных: /proc, /sys, nvidia-smi, /proc/*/cmdline + парсинг лога llama-server
 include/api.h         JSON-сериализация снимка + ApiServer (POSIX-сокеты) + fetch_remote
 src/api.cpp           свой минимальный JSON-парсер (без внешних библиотек)
 src/tui.cpp           ncurses-рендер: box-секции, градиентные бары, 256-цвет, remote-режимы
@@ -180,9 +183,13 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 - **AMD:** утилизация/VRAM/температура из `/sys/class/drm/cardN/device`, power из hwmon
   (amdgpu power1_input); имя — через lspci, если в pci.ids нет имени («Device xxxx») — «AMD GPU».
 - **LLM:** серверы находятся по `llama-server` в `/proc/*/cmdline`; порт и лимит контекста
-  (`-c`/`--ctx-size`) — из аргументов; метрики — один GET `/metrics` (порт по cmdline),
-  имена поддерживаются в виде `llamacpp:name` и `llamacpp_name`;
-  ctx % = min(n_tokens_max, лимит) / лимит.
+  (`-c`/`--ctx-size`) — из аргументов. Метрики (v1.7.0) — парсинг лога llama-server:
+  программа находит путь к `serverlog.txt` по cmdline/окружению процесса и держит скользящее
+  окно последних 500 строк. Маркеры: `stop processing: n_tokens = X` → ctx;
+  `draft acceptance rate = X (Y accepted / Z generated)` → spec accept %; `prompt eval time =
+  A ms / B tokens` → prefill = B/A*1000 t/s; `tg = X t/s` → gen; `LCP similarity, sim_best = X`
+  → cache reuse. LLM-лог — единственный источник данных (v1.8: GET `/metrics` полностью удалён);
+  ctx % = min(n_tokens из лога, лимит) / лимит.
 - **Sensors:** все hwmon-датчики, кроме CPU (k10temp/coretemp) и GPU (amdgpu) — они уже
   в своих секциях; отсев мёртвых зон (acpitz, ACAD) и значений вне 1–150°C.
 - **Disks:** только целые диски (партиции имеют symlink `partition` — отсекаются);
@@ -194,14 +201,27 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 - **Цвета баров:** две гаммы. «Безопасная» (CPU, VRAM): синий→зелёный — 100% нагрузки
   нормально. «Опасная» (RAM, температура, ctx, диски): синий→красный — 100% = неисправность.
 - **LLM-секция** показывается только если найден запущенный `llama-server`;
-  gen/prefill и busy/reqs — двумя строками; сглаживание: среднее из 5 замеров +
-  удержание последнего ненулевого значения 60 сек после нуля.
+  gen/prefill — одной строкой (v1.8: busy/reqs удалены, сглаживание больше не используется).
+- **Правила §6.8c (v1.6.0):** ctx — никогда не 0 (записываем `n_tokens_max`, кроме 0, держим
+  предыдущее значение; ctx % пересчитывается из него); cache reuse / spec accept —
+  статистика за сессию: при недоступности держим предыдущее значение, не обнуляем.
 - **API:** `sysmon -h` отдаёт JSON-снимок на `0.0.0.0:18080` (GET /) — тот же формат,
   что и внутренний снимок Collector; клиент `-ip` парсит его своим минимальным JSON-парсером.
 - **Сеть:** показываются только интерфейсы в `operstate=up`, без lo/veth/br-/docker/tailscale.
 
 ## Релизы
 
+- **v1.8.0** (13.09.2026) — LLM: полностью убран источник `/metrics` (GET к серверу,
+  busy_slots, requests_processing, metrics_ok) — единственный источник данных теперь лог
+  llama-server (`serverlog.txt`, скользящее окно 500 строк); TUI/textout/API-JSON приведены
+  в соответствие; эпизодическое «(метрики недоступны)» при недоступности /metrics больше не возникает.
+- **v1.7.0** (11.09.2026) — LLM-метрики из лога llama-server (`serverlog.txt`, скользящее окно
+  500 строк; маркеры: `stop processing` → ctx, `draft acceptance rate` → spec accept,
+  `prompt eval time = A ms / B tokens` → prefill = B/A*1000, `tg = X t/s` → gen,
+  `LCP similarity, sim_best` → cache reuse); `/metrics` — только busy/requests (там правда).
+- **v1.6.0** (11.09.2026) — правила §6.8c: ctx никогда не 0 (держим предыдущее значение,
+  пересчёт % из него); cache reuse / spec accept держатся при недоступности
+  (статистика за сессию, ≈ одна цифра для модели, не обнуляем).
 - **v1.5.0** (20.08.2026) — название **SYSMON** в заголовке + кредит
   «Designed by Chip and Gayechka (openclaw)» справа (если помещается);
   готовые бинарники на GitHub: Ubuntu (x86-64) и Windows (console, статический);

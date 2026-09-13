@@ -125,10 +125,7 @@ std::string collector_to_json(const Collector& c) {
         j += "\"gen_tps\":" + jnum(l.gen_tps) + ",";
         j += "\"prefill_tps\":" + jnum(l.prefill_tps) + ",";
         j += "\"cache_reuse_percent\":" + jnum(l.cache_reuse_percent) + ",";
-        j += "\"spec_accept_percent\":" + jnum(l.spec_accept_percent) + ",";
-        j += "\"busy_slots\":" + jnum(l.busy_slots) + ",";
-        j += "\"requests_processing\":" + jnum(l.requests_processing) + ",";
-        j += "\"metrics_ok\":" + std::string(l.metrics_ok ? "true" : "false") + "}";
+        j += "\"spec_accept_percent\":" + jnum(l.spec_accept_percent) + "}";
     }
     j += "]}";
     return j;
@@ -369,9 +366,6 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.cache_reuse_percent = (crp >= 0) ? crp : ls.cache_reuse_percent;
             double sap = e.getnum("spec_accept_percent", -1);
             ls.spec_accept_percent = (sap >= 0) ? sap : ls.spec_accept_percent;
-            ls.busy_slots = e.getnum("busy_slots", -1);
-            ls.requests_processing = e.getnum("requests_processing", -1);
-            ls.metrics_ok = e.getnum("metrics_ok", 0) > 0.5;
             out.llms.push_back(ls);
         }
 

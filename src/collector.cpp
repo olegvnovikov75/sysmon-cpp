@@ -50,36 +50,7 @@ static bool read_first_line(const std::string& path, std::string& out) {
     return true;
 }
 
-static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    std::string* s = static_cast<std::string*>(userdata);
-    s->append(ptr, size * nmemb);
-    return size * nmemb;
-}
-
-// значение метрики из тела /metrics; имя ищем и в виде name, и с ':' вместо '_'
-static bool get_metric(const std::string& body, const std::string& name, double& out) {
-    std::istringstream iss(body);
-    std::string line;
-    while (std::getline(iss, line)) {
-        line = trim(line);
-        if (line.empty() || line[0] == '#') continue;
-        std::istringstream ls(line);
-        std::string tok;
-        if (!(ls >> tok)) continue;
-        size_t brace = tok.find('{');
-        if (brace != std::string::npos) tok = tok.substr(0, brace);
-        std::string norm = tok;
-        for (char& c : norm) if (c == ':') c = '_';
-        std::string normq = name;
-        for (char& c : normq) if (c == ':') c = '_';
-        if (norm == normq) {
-            double v;
-            if (ls >> v) { out = v; return true; }
-        }
-    }
-    return false;
-}
-
+// v1.8: /metrics-источник удалён — все LLM-метрики только из лога llama-server
 Collector::Collector() {}
 
 // §6.8c v1.7: парсинг лога llama-server
@@ -851,74 +822,22 @@ void Collector::collect_llm() {
         }
         LogMetrics lm = parse_llm_log(log_path);
 
-        CURL* curl = curl_easy_init();
-        if (curl) {
-            std::string url = "http://127.0.0.1:" + std::to_string(port) + "/metrics";
-            std::string response;
-            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 2000L);
-            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 1000L);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-
-            CURLcode rc = curl_easy_perform(curl);
-            if (getenv("SYSMON_DEBUG"))
-                fprintf(stderr, "[sysmon] port %d curl rc=%d len=%zu\n", port, (int)rc, response.size());
-            if (rc == CURLE_OK) {
-                llm.metrics_ok = true;
-                double v = 0;
-                if (get_metric(response, "llamacpp:n_tokens_max", v)) {
-                    // §6.8c: CTX — никогда не 0: записываем полученное значение,
-                    // кроме 0 (не ищем сброс слота — просто держим предыдущее при 0)
-                    int vint = (int)v;
-                    if (vint > 0) llm.ctx_used = vint;
-                }
-                double gen_raw = 0, prefill_raw = 0, busy_raw = 0, reqs_raw = 0;
-                if (get_metric(response, "llamacpp:predicted_tokens_seconds", v)) gen_raw = v;
-                if (get_metric(response, "llamacpp:prompt_tokens_seconds", v)) prefill_raw = v;
-                double ptot = -1, pcached = -1;
-                if (get_metric(response, "llamacpp:prompt_tokens_total", v)) ptot = v;
-                if (get_metric(response, "llamacpp:prompt_tokens_cached_total", v)) pcached = v;
-                if (ptot > 0 && pcached >= 0)
-                    llm.cache_reuse_percent = 100.0 * pcached / (ptot + pcached);
-                double sacc = -1, sdraft = -1;
-                if (get_metric(response, "llamacpp:spec_decode_num_accepted_tokens_total", v)) sacc = v;
-                if (get_metric(response, "llamacpp:spec_decode_num_draft_tokens_total", v)) sdraft = v;
-                if (sdraft > 0 && sacc >= 0)
-                    llm.spec_accept_percent = 100.0 * sacc / sdraft;
-                if (get_metric(response, "llamacpp:n_busy_slots_per_decode", v)) busy_raw = v;
-                if (get_metric(response, "llamacpp:requests_processing", v)) reqs_raw = v;
-
-                // сглаживание gen/prefill/busy/reqs: среднее из 5 + удержание 60с после нуля
-                auto& sm = llm_smooth_[llm.port];
-                double now = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-                llm.gen_tps = sm.gen.update(gen_raw, now);
-                llm.prefill_tps = sm.prefill.update(prefill_raw, now);
-                llm.busy_slots = sm.busy.update(busy_raw, now);
-                llm.requests_processing = sm.reqs.update(reqs_raw, now);
-
-                // §6.8c: ctx_percent — пересчитываем из ctx_used (который держим при 0)
-                // v1.7: log — источник правды (ctx/spec/prefill/gen из лога; /metrics не врёт про busy/reqs)
-                if (lm.any) {
-                    if (lm.ctx_used > 0) llm.ctx_used = lm.ctx_used;
-                    if (lm.spec_accept_percent >= 0) llm.spec_accept_percent = lm.spec_accept_percent;
-                    if (lm.prefill_tps >= 0) llm.prefill_tps = lm.prefill_tps;
-                    if (lm.gen_tps >= 0) llm.gen_tps = lm.gen_tps;
-                    if (lm.cache_reuse_percent >= 0) llm.cache_reuse_percent = lm.cache_reuse_percent;
-                }
-
-                if (llm.ctx_limit > 0)
-                    llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;
-            } else {
-                // метрики недоступны — показываем «—» (сглаживатель не трогаем)
-                llm.gen_tps = -1; llm.prefill_tps = -1;
-                llm.busy_slots = -1; llm.requests_processing = -1;
-                // §6.8c: cache_reuse_percent/spec_accept_percent — держим предыдущее
-                // (не обнуляем: статистика за сессию, актуальная цифра ≈ одна для модели)
-            }
-            curl_easy_cleanup(curl);
+        // v1.8: лог llama-server — единственный источник данных.
+        // §6.8c: держим предыдущее значение при недоступности (не обнуляем).
+        if (!lm.any) {
+            llm.gen_tps = -1;          // нет записей в окне лога → «—»
+            llm.prefill_tps = -1;
+            // ctx_used / cache_reuse_percent / spec_accept_percent — держим предыдущее
+        } else {
+            if (lm.ctx_used > 0) llm.ctx_used = lm.ctx_used;   // CTX никогда не 0
+            if (lm.spec_accept_percent >= 0) llm.spec_accept_percent = lm.spec_accept_percent;
+            if (lm.prefill_tps >= 0) llm.prefill_tps = lm.prefill_tps;
+            if (lm.gen_tps >= 0) llm.gen_tps = lm.gen_tps;
+            if (lm.cache_reuse_percent >= 0) llm.cache_reuse_percent = lm.cache_reuse_percent;
         }
+
+        if (llm.ctx_limit > 0)
+            llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;
 
         llms.push_back(llm);
     }

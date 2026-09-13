@@ -162,14 +162,11 @@ void render_text(const Collector& c) {
             else
                 printf("  %sLLM%s  port %5d  %-32s  ctx —\n",
                        col.bold, col.rst, l.port, l.model_name.c_str());
-            printf("       gen %6s tok/s   prefill %6s tok/s   cache reuse %3s%%   spec accept %3s%%   busy slots %s   reqs %s%s\n",
+            printf("       gen %6s tok/s   prefill %6s tok/s   cache reuse %3s%%   spec accept %3s%%\n",
                    l.gen_tps >= 0 ? fmt1(l.gen_tps).c_str() : "-",
                    l.prefill_tps >= 0 ? fmt1(l.prefill_tps).c_str() : "-",
                    l.cache_reuse_percent >= 0 ? fmt1(l.cache_reuse_percent).c_str() : "-",
-                   l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent).c_str() : "-",
-                   l.busy_slots >= 0 ? fmt1(l.busy_slots).c_str() : "-",
-                   l.requests_processing >= 0 ? fmt1(l.requests_processing).c_str() : "-",
-                   l.metrics_ok ? "" : "   (метрики недоступны)");
+                   l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent).c_str() : "-");
         }
     }
     hr();

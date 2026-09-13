@@ -485,16 +485,11 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             bar_row(f, {{"cache reuse", C_TXT}}, l.cache_reuse_percent, "%", true);
             bar_row(f, {{"spec accept", C_TXT}}, l.spec_accept_percent, "%", true);
 
-            // gen/prefill и busy/reqs — двумя строками (сглажено: среднее из 5 + удержание 60с после нуля)
+            // gen/prefill — одной строкой (v1.8: только лог llama-server; busy/reqs удалены)
             {
                 std::vector<Seg> row;
                 row.push_back({"gen " + (l.gen_tps >= 0 ? fmt1(l.gen_tps) : std::string("—")) + " t/s   ", C_TXT});
                 row.push_back({"prefill " + (l.prefill_tps >= 0 ? fmt1(l.prefill_tps) : std::string("—")) + " t/s", C_TXT});
-                box_row(f, row);
-                row.clear();
-                row.push_back({"busy " + (l.busy_slots >= 0 ? fmt1(l.busy_slots) : std::string("—")) + "   ", C_DIM});
-                row.push_back({"reqs " + (l.requests_processing >= 0 ? fmt1(l.requests_processing) : std::string("—")), C_DIM});
-                if (!l.metrics_ok) row.push_back({"   (метрики недоступны)", C_WARN});
                 box_row(f, row);
             }
         }

@@ -83,19 +83,18 @@ struct NetStats {
     double tx_mbps = 0.0;
 };
 
+// v1.8: все метрики — только из лога llama-server (/metrics-источник удалён);
+// busy_slots/requests_processing/metrics_ok убраны
 struct LLMStats {
     int port = 0;
     std::string model_name;
     int ctx_limit = 0;           // из cmdline: -c / --ctx-size (0 = не задано)
-    int ctx_used = 0;            // llamacpp:n_tokens_max
+    int ctx_used = 0;            // лог: 'stop processing: n_tokens = X'
     double ctx_percent = -1.0;   // -1 = нельзя посчитать
-    double gen_tps = -1.0;       // predicted_tokens_seconds
-    double prefill_tps = -1.0;   // prompt_tokens_seconds
-    double cache_reuse_percent = -1.0;
-    double spec_accept_percent = -1.0;
-    double busy_slots = -1.0;          // сглажено (среднее из 5)
-    double requests_processing = -1.0; // сглажено (среднее из 5)
-    bool metrics_ok = false;
+    double gen_tps = -1.0;       // лог: 'tg = X t/s'
+    double prefill_tps = -1.0;   // лог: 'prompt eval time = A ms / B tokens' → B/A*1000
+    double cache_reuse_percent = -1.0;  // лог: 'LCP similarity, sim_best = X'
+    double spec_accept_percent = -1.0;  // лог: 'draft acceptance rate = ... (Y / Z)'
 };
 
 class Collector {
@@ -124,8 +123,7 @@ private:
     double prev_net_ts_ = 0.0;
     std::map<std::string, std::pair<uint64_t, uint64_t>> prev_net_;  // iface -> (rx,tx)
 
-    struct LLMSmooth { Smooth5 gen, prefill, busy, reqs; };
-    std::map<int, LLMSmooth> llm_smooth_;  // ключ — порт LLM-сервера
+
 
     void collect_cpu();
     void collect_ram();
