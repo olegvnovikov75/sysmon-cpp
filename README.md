@@ -211,6 +211,9 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 
 ## Релизы
 
+- **v1.9c** (13.09.2026) — LLM: decode gen из лога ('tg = X t/s', держим предыдущее при недоступности); prefill upl./gen. (прогресс ≤30 замеров + 'prompt eval time')
+- **v1.9b** (13.09.2026) — merge_h: когда left-frame title_cont → правый хвост тоже пробелами (без черты); prefill без лишних пробелов
+
 - **v1.8.0** (13.09.2026) — LLM: полностью убран источник `/metrics` (GET к серверу,
   busy_slots, requests_processing, metrics_ok) — единственный источник данных теперь лог
   llama-server (`serverlog.txt`, скользящее окно 500 строк); TUI/textout/API-JSON приведены
