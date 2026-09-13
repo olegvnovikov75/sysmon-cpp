@@ -636,7 +636,7 @@ bool tui_frame(const Collector& local, const Collector* remote, TuiState& st) {
     curs_set(0);   // курсор может «проявляться» на некоторых терминалах — прячем каждый кадр
 
     timeout(st.interval * 1000);
-    int ch = getch();
+    int ch = wgetch(stdscr);   // v1.8: wgetch — стабильно ловит все клавиши (getch + stdscr-буфер)
     timeout(-1);
     // ncurses может возвращать кириллицу парой UTF-8-байтов — собираем в символ
     // (й = D0 B9, к = D0 BA, ь = D1 9F)
