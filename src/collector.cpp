@@ -819,7 +819,6 @@ void Collector::collect_llm() {
         std::ifstream f(path, std::ios::binary);
         if (!f.is_open()) continue;
         std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        if (raw.find("llama-server") == std::string::npos) continue;
 
         // разбить на аргументы
         std::vector<std::string> args;
@@ -830,8 +829,31 @@ void Collector::collect_llm() {
         }
         if (!cur.empty()) args.push_back(cur);
 
+        // v1.10: docker-раны (agentionai, 87G): на хосте процесс = `docker run ...` —
+        // строки "llama-server" в cmdline нет (аргументы разделены нулями!),
+        // но аргументы -m/--alias/-c и путь .gguf на месте
+        bool is_docker_llm = false;
+        if (raw.find("llama-server") == std::string::npos) {
+            bool docker_run = (args.size() >= 2 && basename_of(args[0]) == "docker" && args[1] == "run");
+            bool looks_llm = (raw.find("--alias") != std::string::npos || raw.find(".gguf") != std::string::npos);
+            if (docker_run && looks_llm) is_docker_llm = true;
+            else continue;
+        }
+
         std::string port_s = arg_value(args, {"--port"});
         int port = atoi(port_s.c_str());
+        if (port <= 0 && is_docker_llm) {
+            // v1.10: у контейнерного llama-server нет --port (внутри 8080),
+            // реальный порт — хостовая часть -p HOST:CONTAINER
+            for (size_t i = 0; i + 1 < args.size(); i++) {
+                if (args[i] == "-p" || args[i] == "--publish") {
+                    const std::string& pv = args[i + 1];
+                    size_t colon = pv.find(':');
+                    port = atoi((colon == std::string::npos) ? pv.c_str() : pv.substr(0, colon).c_str());
+                    if (port > 0) break;
+                }
+            }
+        }
         if (port <= 0) continue;
 
         std::string model = arg_value(args, {"--alias"});
