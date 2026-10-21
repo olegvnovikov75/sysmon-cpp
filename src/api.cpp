@@ -231,6 +231,7 @@ private:
 
     JVal value() {
         JVal v;
+        skipws();   // v2.0 FIX: ведущие пробелы — иначе JSON с отступами (не compактный) падал
         if (!ok_ || pos_ >= s_.size()) { ok_ = false; return v; }
         char c = s_[pos_];
         if (c == '{') {

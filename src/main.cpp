@@ -151,6 +151,7 @@ int main(int argc, char* argv[]) {
                     bool ok = fetch_remote(ip, remote, err);
                     st.remote_ok = ok;
                     if (ok) st.remote_fetch_wall = (double)std::time(nullptr);   // v2.0: часы remote тикают от этого момента
+                    else if (getenv("SYSMON_DEBUG")) fprintf(stderr, "[sysmon] remote fetch fail: %s\n", err.c_str());
                     retries = ok ? 0 : retries + 1;
                     // первый кадр после неудачи: пауза ~2с — и снова пробуем (пока не подключится)
                     if (!ok && retries == 1) {
