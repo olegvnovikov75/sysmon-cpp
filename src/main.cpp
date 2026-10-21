@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <clocale>
 #include <cstdio>
+#include <ctime>
 #include <thread>
 #include <chrono>
 #ifdef _WIN32
@@ -149,6 +150,7 @@ int main(int argc, char* argv[]) {
                     std::string err;
                     bool ok = fetch_remote(ip, remote, err);
                     st.remote_ok = ok;
+                    if (ok) st.remote_fetch_wall = (double)std::time(nullptr);   // v2.0: часы remote тикают от этого момента
                     retries = ok ? 0 : retries + 1;
                     // первый кадр после неудачи: пауза ~2с — и снова пробуем (пока не подключится)
                     if (!ok && retries == 1) {
@@ -156,7 +158,9 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (!tui_frame(c, st.remote_addr.empty() ? nullptr : &remote, st)) break;
+            // v2.0: суб-рефреш каждые ~0.5 с — ядра CPU и LLM-метрики в реальном времени
+            if (!tui_frame(c, st.remote_addr.empty() ? nullptr : &remote, st,
+                           [&c]() { c.collect_fast(); })) break;
         }
         tui_shutdown();
         if (getenv("SYSMON_DEBUG")) fprintf(stderr, "[sysmon] endwin done\n");

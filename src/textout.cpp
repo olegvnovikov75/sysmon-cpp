@@ -73,8 +73,10 @@ void render_text(const Collector& c) {
     strftime(ts, sizeof(ts), "%d.%m.%Y %H:%M:%S", localtime(&t));
 
     hr();
+    // v2.0: машина — IP (стандарт как в TUI), hostname — только если IP не определился
+    std::string ip = primary_ip("");
     printf("%s%s%s  |  %s  |  up %s%s\n",
-           col.bold, hostname_str().c_str(), col.rst, ts, uptime_str().c_str(), col.rst);
+           col.bold, (ip.empty() ? hostname_str() : ip).c_str(), col.rst, ts, uptime_str().c_str(), col.rst);
     hr();
 
     // CPU
@@ -90,11 +92,10 @@ void render_text(const Collector& c) {
                color_for_pct(col, c.cpu.usage), c.cpu.usage, col.rst,
                c.cpu.load1, c.cpu.load5, c.cpu.load15, c.cpu.cores, cpu_model.c_str());
 
-    // RAM
-    printf("RAM:  %s%4.1f / %4.1f GiB  (%3.0f%%)%s   Swap: %4.2f / %4.2f GiB\n",
+    // RAM (v2.0: swap убран, единицы — Gb)
+    printf("RAM:  %s%4.1f / %4.1f Gb  (%3.0f%%)%s\n",
            color_for_pct(col, c.ram.usage_percent),
-           c.ram.used_gb, c.ram.total_gb, c.ram.usage_percent, col.rst,
-           c.ram.swap_used_gb, c.ram.swap_total_gb);
+           c.ram.used_gb, c.ram.total_gb, c.ram.usage_percent, col.rst);
 
     // GPU
     if (c.gpus.empty()) {
@@ -102,7 +103,7 @@ void render_text(const Collector& c) {
     } else {
         for (const auto& g : c.gpus) {
             double vram_pct = (g.vram_total_gb > 0) ? 100.0 * g.vram_used_gb / g.vram_total_gb : 0;
-            printf("  %sGPU%d%s  %-28s  util %s%3.0f%%%s  vram %5.1f/%5.1f GiB (%2.0f%%)",
+            printf("  %sGPU%d%s  %-28s  util %s%3.0f%%%s  vram %5.1f/%5.1f Gb (%2.0f%%)",
                    col.bold, g.index, col.rst, g.name.c_str(),
                    color_for_pct(col, g.utilization), g.utilization, col.rst,
                    g.vram_used_gb, g.vram_total_gb, vram_pct);
@@ -128,7 +129,11 @@ void render_text(const Collector& c) {
             rx += ifc.rx_mbps;
             tx += ifc.tx_mbps;
         }
-        printf("NET:  rx %5.1f MB/s  tx %5.1f MB/s   [%s]\n", rx, tx, list.c_str());
+        // v2.0: малые скорости — в KB/s (иначе всегда «0.0 MB/s»)
+        if (rx < 0.1 && tx < 0.1)
+            printf("NET:  rx %6.0f KB/s  tx %6.0f KB/s   [%s]\n", rx * 1024.0, tx * 1024.0, list.c_str());
+        else
+            printf("NET:  rx %5.1f MB/s  tx %5.1f MB/s   [%s]\n", rx, tx, list.c_str());
     }
 
     // DISKS — целые диски (+ занятость ФС; без ФС — по партициям)
@@ -137,16 +142,16 @@ void render_text(const Collector& c) {
             std::string md = d.model.empty() ? "" : "  " + d.model;  // не .c_str() с временного!
             if (d.by_partitions)
                 // ФС не смонтирована — точная занятость неизвестна
-                printf("  %s%-8s%s %-4s %7.1f GiB  [%s]%s\n",
+                printf("  %s%-8s%s %-4s %7.1f Gb  [%s]%s\n",
                        col.bold, d.name.c_str(), col.rst, d.type.c_str(),
                        d.size_gb, d.fs.c_str(), md.c_str());
             else if (d.usage_percent >= 0)
-                printf("  %s%-8s%s %-4s %7.1f / %7.1f GiB  %s%3.0f%%%s%s\n",
+                printf("  %s%-8s%s %-4s %7.1f / %7.1f Gb  %s%3.0f%%%s%s\n",
                        col.bold, d.name.c_str(), col.rst, d.type.c_str(),
                        d.used_gb, d.total_gb,
                        color_for_pct(col, d.usage_percent), d.usage_percent, col.rst, md.c_str());
             else
-                printf("  %s%-8s%s %-4s %6.1f GiB%s\n",
+                printf("  %s%-8s%s %-4s %6.1f Gb%s\n",
                        col.bold, d.name.c_str(), col.rst, d.type.c_str(), d.size_gb, md.c_str());
         }
     }
@@ -162,15 +167,20 @@ void render_text(const Collector& c) {
             else
                 printf("  %sLLM%s  port %5d  %-32s  ctx —\n",
                        col.bold, col.rst, l.port, l.model_name.c_str());
-            // v1.9: prefill — два значения (прогресс / чистая загрузка prompt); task/n_tokens/trunc из лога
-            // v1.9b: prefill upl./gen. (директива Шефа 13.09; без лишних пробелов)
-            // v1.9c: decode gen (из лога)
-            if (l.gen_tps > 0) printf("       decode gen.%6s tok/s", fmt1(l.gen_tps).c_str());
-            else printf("       decode gen.   —   tok/s");
-            printf("   prefill upl.%7s / gen.%7s t/s   cache reuse %3s%%   spec accept %3s%%%s\n",
-                   l.gen_tps >= 0 ? fmt1(l.gen_tps).c_str() : "-",
-                   l.prefill_tps >= 0 ? fmt1(l.prefill_tps).c_str() : "-",
-                   l.prefill2_tps > 0 ? fmt1(l.prefill2_tps).c_str() : "-",
+            // v2.0: разбор printa поправлен — аргументы стояли НЕ на своих местах
+            // (cache reuse печатал prefill2, spec accept — cache, spec — висячим %s).
+            // Теперь: decode gen | prefill upl./gen. — как в TUI; плюс ACTIVE-тег.
+            printf("       ");
+            if (!l.active.empty()) printf("%sACTIVE: %s%s   ", col.yel, l.active.c_str(), col.rst);
+            if (l.gen_tps > 0) printf("decode gen.%6s t/s", fmt1(l.gen_tps).c_str());
+            else printf("decode gen.   —   t/s");
+            if (l.prefill_tps >= 0 && l.prefill2_tps > 0)
+                printf("   prefill upl.%7s / gen.%7s t/s", fmt1(l.prefill_tps).c_str(), fmt1(l.prefill2_tps).c_str());
+            else if (l.prefill_tps >= 0)
+                printf("   prefill upl.%7s / gen.      - t/s", fmt1(l.prefill_tps).c_str());
+            else
+                printf("   prefill upl.      - / gen.      - t/s");
+            printf("   cache reuse %5s%%   spec accept %5s%%\n",
                    l.cache_reuse_percent >= 0 ? fmt1(l.cache_reuse_percent).c_str() : "-",
                    l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent).c_str() : "-");
             if (l.last_task > 0 || l.last_truncated >= 0)
