@@ -8,7 +8,7 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 
 ## Скриншот (v2.0: локальная машина + remote `-ip`, две панели)
 
-![SYSMON v2.0](docs/screenshot-v2.0.png)
+![SYSMON v2.0](docs/sysmon_v.2.png)
 
 ## Что показывает
 
