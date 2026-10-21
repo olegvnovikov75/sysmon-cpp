@@ -35,10 +35,10 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 | Платформа | Файл | Ссылка |
 |---|---|---|
 | Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-ubuntu) |
-| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v1.5.0/sysmon-windows-console.exe) |
-| Исходники | `sysmon-cpp-v1.5.0-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-cpp-v2.0-src.tar.gz) |
+| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-windows-console.exe) |
+| Исходники | `sysmon-cpp-v2.0-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-cpp-v2.0-src.tar.gz) |
 
-Примечание: в v1.6.0/v1.7.0 обновлён только `sysmon-ubuntu` (Linux); Windows-бинарник будет пересобран при установке cross-libcurl.
+Примечание: Windows-бинарник v2.0 пересобран (mingw, статический) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
 
 Все релизы: [github.com/olegvnovikov75/sysmon-cpp/releases](https://github.com/olegvnovikov75/sysmon-cpp/releases)
 
