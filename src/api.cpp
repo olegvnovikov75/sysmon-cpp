@@ -48,6 +48,7 @@ std::string collector_to_json(const Collector& c) {
     j.reserve(4096);
     j += "{";
     j += "\"host\":\"" + jesc(c.host) + "\",";
+    j += "\"ip\":\"" + jesc(c.ip) + "\",";                    // v2.0: основной IPv4 машины
     j += "\"ts\":\"" + jesc(c.ts) + "\",";
     j += "\"uptime_s\":" + jnum(c.uptime_s) + ",";
 
@@ -58,7 +59,16 @@ std::string collector_to_json(const Collector& c) {
     j += "\"load5\":" + jnum(c.cpu.load5) + ",";
     j += "\"load15\":" + jnum(c.cpu.load15) + ",";
     j += "\"cores\":" + jnum(c.cpu.cores) + ",";
-    j += "\"model\":\"" + jesc(c.cpu.model) + "\"}";
+    j += "\"model\":\"" + jesc(c.cpu.model) + "\"";   // v2.0: закрытая кавычка — иначе JSON битый
+    if (!c.cpu.core_usage.empty()) {                          // v2.0: загрузка по ядрам
+        j += ",\"cores_usage\":[";
+        for (size_t i = 0; i < c.cpu.core_usage.size(); i++) {
+            if (i) j += ",";
+            j += jnum(c.cpu.core_usage[i]);
+        }
+        j += "]";
+    }
+    j += "}";
 
     j += ",\"ram\":{";
     j += "\"used_gb\":" + jnum(c.ram.used_gb) + ",";
@@ -128,7 +138,8 @@ std::string collector_to_json(const Collector& c) {
         j += "\"spec_accept_percent\":" + jnum(l.spec_accept_percent) + ",";
         j += "\"prefill2_tps\":" + jnum(l.prefill2_tps) + ",";       // v1.9: чистая загрузка prompt
         j += "\"last_task\":" + std::to_string(l.last_task) + ",";   // v1.9: №task из лога
-        j += "\"last_truncated\":" + std::to_string(l.last_truncated) + "}";
+        j += "\"last_truncated\":" + std::to_string(l.last_truncated) + ",";
+        j += "\"active\":\"" + jesc(l.active) + "\"}";                // v2.0: "gen"|"prefill"|""
     }
     j += "]}";
     return j;
@@ -278,6 +289,7 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
     if (root.t != JVal::OBJ) { err = "JSON: ожидается объект"; return false; }
 
     out.host = root.getstr("host");
+    out.ip = root.getstr("ip");           // v2.0 (отсутствует у старых серверов — пусто)
     out.ts = root.getstr("ts");
     out.uptime_s = root.getnum("uptime_s", 0);
 
@@ -289,6 +301,10 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
         out.cpu.load15 = cpu->getnum("load15", 0);
         out.cpu.cores = (int)cpu->getnum("cores", 0);
         out.cpu.model = cpu->getstr("model");
+        out.cpu.core_usage.clear();        // v2.0
+        if (const JVal* cu = cpu->find("cores_usage"); cu && cu->t == JVal::ARR)
+            for (const auto& e : cu->arr)
+                if (e.t == JVal::NUM) out.cpu.core_usage.push_back(e.num);
     }
     if (const JVal* ram = root.find("ram")) {
         out.ram.used_gb = ram->getnum("used_gb", 0);
@@ -373,6 +389,7 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.prefill2_tps = (p2 > 0) ? p2 : ls.prefill2_tps;        // держим предыдущее при недоступности
             ls.last_task = (int)e.getnum("last_task", 0);
             ls.last_truncated = (int)e.getnum("last_truncated", -1);   // v1.9: №task/trunc из лога
+            ls.active = e.getstr("active");                            // v2.0: gen/prefill/"
             out.llms.push_back(ls);
         }
 

@@ -13,6 +13,7 @@ struct CPUStats {
     double load1 = 0.0, load5 = 0.0, load15 = 0.0;
     int cores = 0;
     std::string model;           // из /proc/cpuinfo "model name"
+    std::vector<double> core_usage;   // v2.0: загрузка каждого ядра 0..100 (пусто = нет данных)
 };
 
 struct RAMStats {
@@ -98,6 +99,7 @@ struct LLMStats {
     double prefill2_tps = -1.0;         // v1.9: prefill из 'prompt eval time' (генерация/короткий prompt), отдельно от загрузки
     int last_task = 0;                  // v1.9: №task из 'stop processing' (последний в окне лога)
     int last_truncated = -1;            // v1.9: truncated из 'stop processing'
+    std::string active;                 // v2.0: "gen" | "prefill" | "" — что модель делает СЕЙЧАС
 };
 
 class Collector {
@@ -116,13 +118,17 @@ public:
 
     // метаданные снимка (для API/консолидации)
     std::string host;      // hostname
+    std::string ip;        // v2.0: основной IPv4 машины (для шапки панели)
     std::string ts;        // время снимка (дд.мм.гггг чч:мм:сс)
     double uptime_s = 0.0;
+
+    void collect_fast();    // v2.0: только CPU + LLM — суб-рефреш TUI (реалтайв gen/prefill)
 
 private:
     bool first_cpu_ = true;
     uint64_t prev_cpu_idle_ = 0;
     uint64_t prev_cpu_total_ = 0;
+    std::vector<std::pair<uint64_t, uint64_t>> prev_core_;   // v2.0: (idle,total) по ядрам
     double prev_net_ts_ = 0.0;
     std::map<std::string, std::pair<uint64_t, uint64_t>> prev_net_;  // iface -> (rx,tx)
 
@@ -138,5 +144,9 @@ private:
 
     static double cpu_temperature();
 };
+
+// v2.0: основной IPv4 машины (UDP-connect трюк без отправки пакетов; peer —
+// желаемый адрес назначения, пустой → дефолтный маршрут; fallback — getaddrinfo)
+std::string primary_ip(const std::string& peer);
 
 #endif // COLLECTOR_H

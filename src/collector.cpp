@@ -28,6 +28,15 @@ inline void globfree(glob_t*) {}
 #include <unistd.h>
 #include <ctime>
 #include <curl/curl.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#endif
 
 // ---------- утилиты ----------
 
@@ -53,144 +62,207 @@ static bool read_first_line(const std::string& path, std::string& out) {
 // v1.8: /metrics-источник удалён — все LLM-метрики только из лога llama-server
 Collector::Collector() {}
 
-// §6.8c v1.7: парсинг лога llama-server
-// v1.9: prefill — два источника:
-//  - 'prompt processing, ... t = X s / Y tokens per second' → prefill_samples (сглаживается средним ≤30 замеров)
-//  - 'prompt eval time = A ms / B tokens' → prefill2_tps_v (итог загрузки prompt — чистая цифра, без смешивания)
-struct LogMetrics {
+// v2.0: основной IPv4 машины — UDP-connect трюк (пакеты НЕ отправляются),
+// fallback — getaddrinfo по hostname (первой не-loopback IPv4)
+std::string primary_ip(const std::string& peer) {
+    std::string tgt = peer;
+    size_t c = tgt.rfind(':');
+    if (c != std::string::npos) tgt = tgt.substr(0, c);
+    if (tgt.empty()) tgt = "8.8.8.8";
+    std::string out;
+    int fd = (int)socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(53);
+        if (inet_pton(AF_INET, tgt.c_str(), &sa.sin_addr) == 1 &&
+            connect(fd, (struct sockaddr*)&sa, sizeof(sa)) == 0) {
+            struct sockaddr_in me;
+            memset(&me, 0, sizeof(me));
+            socklen_t ml = sizeof(me);
+            if (getsockname(fd, (struct sockaddr*)&me, &ml) == 0) {
+                char ib[64] = "";
+                if (inet_ntop(AF_INET, &me.sin_addr, ib, sizeof(ib))) out = ib;
+            }
+        }
+#ifdef _WIN32
+        closesocket(fd);
+#else
+        close(fd);
+#endif
+    }
+    if (!out.empty()) return out;
+    char hb[256] = "";
+    gethostname(hb, sizeof(hb) - 1);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    struct addrinfo* res = nullptr;
+    if (hb[0] && getaddrinfo(hb, nullptr, &hints, &res) == 0 && res) {
+        for (struct addrinfo* a = res; a; a = a->ai_next) {
+            if (a->ai_family == AF_INET && a->ai_addr) {
+                struct sockaddr_in* sn = (struct sockaddr_in*)a->ai_addr;
+                if ((ntohl(sn->sin_addr.s_addr) & 0xff000000u) != 0x7f000000u) {
+                    char ib[64] = "";
+                    if (inet_ntop(AF_INET, &sn->sin_addr, ib, sizeof(ib))) { out = ib; break; }
+                }
+            }
+        }
+        freeaddrinfo(res);
+    }
+    return out;
+}
+
+// ---------- v2.0: инкрементальный парсинг лога llama-server ----------
+// Состояние живёт между циклами сбора (по одному на файл лога): читаем только
+// «хвост» файла от сохранённого offset, а не перебираем окно в 500 строк каждый цикл.
+// Свежесть маркеров определяет активную фазу модели (жёлтый gen/prefill в TUI).
+struct LlmLogState {
+    long long offset = 0;              // обработанные байты файла
     int ctx_used = 0;
-    double spec_accept_percent = -1.0;
-    double prefill_tps = -1.0;      // из 'prompt processing' (Collector пересчитает среднее ≤30 замеров)
-    std::vector<double> prefill_samples;   // сырые значения за окно лога
-    double prefill2_tps_v = -1.0;  // из 'prompt eval time'
-    double gen_tps_v = -1.0;   // v1.9c: из 'tg =' (Collector пересчитает)
-    double cache_reuse_percent = -1.0;
-    int last_task = 0;              // из 'stop processing' (последний в окне лога)
+    int last_task = 0;
     int last_truncated = -1;
-    bool any = false;
+    double spec_accept_percent = -1.0;
+    double cache_reuse_percent = -1.0;
+    double gen_tps = -1.0;
+    double prefill2_tps = -1.0;
+    std::deque<double> prefill_samples;         // последние 30 замеров 'prompt processing'
+    double ts_gen = -1e18, ts_prefill = -1e18;  // время последнего вида маркеров (steady, с)
 };
 
-static LogMetrics parse_llm_log(const std::string& log_path, int max_lines = 500) {
-    LogMetrics m;
-    std::ifstream f(log_path);
-    if (!f.is_open()) return m;
-    std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(f, line)) {
-        lines.push_back(line);
-        if (lines.size() > (size_t)max_lines) lines.erase(lines.begin());
-    }
-    for (const auto& l : lines) {
-        size_t p;
-        // v1.9: stop processing — task №, n_tokens (ctx), truncated
-        p = l.find("stop processing: n_tokens = ");
-        if (p != std::string::npos) {
-            m.ctx_used = atoi(l.c_str() + p + 28);
-            // "... | task NNNN | stop processing" — ищем "task " до p
-            size_t t1 = l.rfind("task ", p);
-            if (t1 != std::string::npos && p - t1 < 40) {
-                int tv = atoi(l.c_str() + t1 + 5);
-                if (tv > 0) m.last_task = tv;   // последнее в окне = последний завершённый task
-            }
-            size_t tr1 = l.find("truncated = ", p);
-            if (tr1 != std::string::npos) m.last_truncated = atoi(l.c_str() + tr1 + 11);
-            m.any = true;
-        }
-        p = l.find("draft acceptance rate = ");
-        if (p != std::string::npos) {
-            std::string rest = l.substr(p + 24);
-            size_t a1 = rest.find("(");
-            size_t a2 = rest.find("accepted");
-            if (a1 != std::string::npos && a2 != std::string::npos) {
-                size_t a3 = rest.find("generated");
-                std::string in_paren = (a3 != std::string::npos) ? rest.substr(a1 + 1, a3 - a1 - 1) : rest.substr(a1 + 1, a2 - a1 - 1);
-                std::vector<int> nums;
-                int cur = 0; bool innum = false;
-                for (char ch : in_paren) {
-                    if (ch >= '0' && ch <= '9') { cur = cur * 10 + (ch - '0'); innum = true; }
-                    else if (innum) { nums.push_back(cur); cur = 0; innum = false; }
-                }
-                if (innum) nums.push_back(cur);
-                if (nums.size() >= 2 && nums[1] > 0)
-                    m.spec_accept_percent = 100.0 * (double)nums[0] / (double)nums[1];
-                m.any = true;
-            }
-        }
-        // v1.9: prefill из 'prompt processing, n_tokens = N, progress = P, t = X s / Y tokens per second'
-        p = l.find("prompt processing,");
-        if (p != std::string::npos) {
-            size_t toks_per_s = l.find("tokens per second", p);
-            if (toks_per_s != std::string::npos) {
-                // число перед " tokens per second" — идём назад от него
-                size_t c1 = toks_per_s;
-                while (c1 > 0 && l[c1 - 1] == ' ') c1--;
-                while (c1 > 0 && l[c1 - 1] >= '0' && l[c1 - 1] <= '9') c1--;
-                while (c1 > 0 && l[c1 - 1] == '.') c1--;
-                while (c1 > 0 && l[c1 - 1] >= '0' && l[c1 - 1] <= '9') c1--;
-                double v = atof(l.substr(c1, toks_per_s - c1).c_str());
-                if (v > 0) {
-                    m.prefill_samples.push_back(v);
-                    m.any = true;
-                }
-            }
-        }
-
-        p = l.find("prompt eval time =");
-        if (p != std::string::npos) {
-            // "prompt eval time =     691.36 ms /    47 tokens" → prefill = 47 / 0.69136 = 67.98 t/s
-            size_t ms1 = l.find("ms /", p);
-            if (ms1 == std::string::npos) ms1 = l.find("ms", p);
-            size_t tok1 = l.find("tokens", p);
-            if (ms1 != std::string::npos && tok1 != std::string::npos) {
-                // число перед "ms" (пропускать пробелы)
-                size_t ms2 = ms1;
-                while (ms2 > 0 && l[ms2 - 1] == ' ') ms2--;
-                while (ms2 > 0 && l[ms2 - 1] >= '0' && l[ms2 - 1] <= '9') ms2--;
-                while (ms2 > 0 && l[ms2 - 1] == '.') ms2--;
-                while (ms2 > 0 && l[ms2 - 1] >= '0' && l[ms2 - 1] <= '9') ms2--;
-                double ms_val = atof(l.substr(ms2, ms1 - ms2).c_str());
-                // число перед "tokens" (пропускать пробелы)
-                size_t tok2 = tok1;
-                while (tok2 > 0 && l[tok2 - 1] == ' ') tok2--;
-                while (tok2 > 0 && l[tok2 - 1] >= '0' && l[tok2 - 1] <= '9') tok2--;
-                double tok_val = atof(l.substr(tok2, tok1 - tok2).c_str());
-                if (ms_val > 0 && tok_val > 0) {
-                    // v1.9: prefill2 — ЧИСТАЯ скорость загрузки prompt (отдельно от прогресса)
-                    m.prefill2_tps_v = tok_val / (ms_val / 1000.0);
-                }
-                m.any = true;
-            }
-        }
-        // v1.9c: decode gen — 'tg =' (последнее в окне лога)
-        p = l.find("tg = ");
-        if (p != std::string::npos) {
-            size_t c1 = p + 5;
-            while (c1 < l.size() && l[c1] == ' ') c1++;   // пропустить пробелы
-            // v1.9c: число после "tg = " — идём до пробела/конца строки, потом atof
-            size_t c2 = c1;
-            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
-            if (l[c2] == '.') {
-                c2++;   // точка
-                while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
-            }
-            if (c2 > c1) m.gen_tps_v = atof(l.substr(c1, c2 - c1).c_str());
-            m.any = true;
-        }
-        // cache reuse: "LCP similarity, sim_best = X"
-        p = l.find("LCP similarity, sim_best = ");
-        if (p != std::string::npos) {
-            size_t c1 = p + 28;
-            while (c1 < l.size() && l[c1] == ' ') c1++;
-            size_t c2 = c1;
-            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
-            while (c2 < l.size() && l[c2] == '.') c2++;
-            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
-            if (c2 > c1) m.cache_reuse_percent = 100.0 * atof(l.substr(c1, c2 - c1).c_str());
-            m.any = true;
-        }
-    }
-    return m;
+static double steady_now() {
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+// Маркер llama-server → обновление состояния. Форматы: классический llama.cpp и
+// unsloth-форк (87G): 'draft acceptance = 0.513 (...)', 'f_sim_best = 0.967' —
+// v2.0 чинит spec accept и cache reuse для 87G (раньше маркеры не совпадали).
+static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
+    size_t p;
+    // stop processing — №task, n_tokens (ctx), truncated
+    p = l.find("stop processing: n_tokens = ");
+    if (p != std::string::npos) {
+        int v = atoi(l.c_str() + p + 28);
+        if (v > 0) s.ctx_used = v;   // §6.8c: CTX никогда не 0
+        size_t t1 = l.rfind("task ", p);
+        if (t1 != std::string::npos && p - t1 < 40) {
+            int tv = atoi(l.c_str() + t1 + 5);
+            if (tv > 0) s.last_task = tv;
+        }
+        size_t tr1 = l.find("truncated = ", p);
+        if (tr1 != std::string::npos) s.last_truncated = atoi(l.c_str() + tr1 + 11);
+    }
+    // spec accept: 'draft acceptance [rate] = 0.51299 ( 6159 accepted / 12006 generated)'
+    p = l.find("draft acceptance");
+    if (p != std::string::npos) {
+        size_t eq = l.find('=', p);
+        if (eq != std::string::npos) {
+            double v = atof(l.c_str() + eq + 1);
+            if (v > 0 && v <= 1.0001) s.spec_accept_percent = v * 100.0;
+            else if (v > 1.0 && v <= 100.0) s.spec_accept_percent = v;
+        }
+    }
+    // prefill прогресс: 'prompt processing, n_tokens = N, progress = P, t = X s / Y tokens per second'
+    p = l.find("prompt processing,");
+    if (p != std::string::npos) {
+        size_t toks_per_s = l.find("tokens per second", p);
+        if (toks_per_s != std::string::npos) {
+            size_t c1 = toks_per_s;
+            while (c1 > 0 && l[c1 - 1] == ' ') c1--;
+            while (c1 > 0 && l[c1 - 1] >= '0' && l[c1 - 1] <= '9') c1--;
+            while (c1 > 0 && l[c1 - 1] == '.') c1--;
+            while (c1 > 0 && l[c1 - 1] >= '0' && l[c1 - 1] <= '9') c1--;
+            double v = atof(l.substr(c1, toks_per_s - c1).c_str());
+            if (v > 0) {
+                s.prefill_samples.push_back(v);
+                if (s.prefill_samples.size() > 30) s.prefill_samples.pop_front();
+                s.ts_prefill = now;   // prefill идёт (прогресс-строки стримятся)
+            }
+        }
+    }
+    // prompt eval time — ЧИСТАЯ скорость загрузки prompt (итог запроса;
+    // НЕ маркер активности: печатается при завершении и давал бы «жёлтый» после конца)
+    p = l.find("prompt eval time =");
+    if (p != std::string::npos) {
+        size_t ms1 = l.find("ms /", p);
+        if (ms1 == std::string::npos) ms1 = l.find("ms", p);
+        size_t tok1 = l.find("tokens", p);
+        if (ms1 != std::string::npos && tok1 != std::string::npos) {
+            size_t ms2 = ms1;
+            while (ms2 > 0 && l[ms2 - 1] == ' ') ms2--;
+            while (ms2 > 0 && l[ms2 - 1] >= '0' && l[ms2 - 1] <= '9') ms2--;
+            while (ms2 > 0 && l[ms2 - 1] == '.') ms2--;
+            while (ms2 > 0 && l[ms2 - 1] >= '0' && l[ms2 - 1] <= '9') ms2--;
+            double ms_val = atof(l.substr(ms2, ms1 - ms2).c_str());
+            size_t tok2 = tok1;
+            while (tok2 > 0 && l[tok2 - 1] == ' ') tok2--;
+            while (tok2 > 0 && l[tok2 - 1] >= '0' && l[tok2 - 1] <= '9') tok2--;
+            double tok_val = atof(l.substr(tok2, tok1 - tok2).c_str());
+            if (ms_val > 0 && tok_val > 0) s.prefill2_tps = tok_val / (ms_val / 1000.0);
+        }
+    }
+    // decode gen — 'tg = X t/s' (при декоде стримится примерно каждые 3 секунды)
+    p = l.find("tg = ");
+    if (p != std::string::npos) {
+        size_t c1 = p + 5;
+        while (c1 < l.size() && l[c1] == ' ') c1++;
+        size_t c2 = c1;
+        while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+        if (c2 < l.size() && l[c2] == '.') {
+            c2++;
+            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+        }
+        if (c2 > c1) {
+            s.gen_tps = atof(l.substr(c1, c2 - c1).c_str());
+            s.ts_gen = now;
+        }
+    }
+    // cache reuse: 'sim_best = X' / unsloth-форк: 'f_sim_best = X' (0..1)
+    p = l.find("sim_best = ");
+    if (p != std::string::npos) {
+        size_t c1 = p + 11;
+        while (c1 < l.size() && l[c1] == ' ') c1++;
+        size_t c2 = c1;
+        while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+        if (c2 < l.size() && l[c2] == '.') {
+            c2++;
+            while (c2 < l.size() && l[c2] >= '0' && l[c2] <= '9') c2++;
+        }
+        if (c2 > c1) {
+            double v = atof(l.substr(c1, c2 - c1).c_str());
+            if (v >= 0 && v <= 1.0001) s.cache_reuse_percent = 100.0 * v;
+        }
+    }
+}
+
+// дочитать файл лога от сохранённого offset до конца (ротация — перечитать с начала)
+static void update_llm_log(LlmLogState& s, const std::string& path) {
+    if (path.empty()) return;
+    struct stat st0;
+    if (stat(path.c_str(), &st0) != 0) return;
+    long long sz = (long long)st0.st_size;
+    if (s.offset > sz) s.offset = 0;
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return;
+#ifdef _WIN32
+    if (_fseeki64(f, s.offset, SEEK_SET) != 0) { fclose(f); return; }
+#else
+    if (fseeko(f, (off_t)s.offset, SEEK_SET) != 0) { fclose(f); return; }
+#endif
+    double now = steady_now();
+    char buf[8192];
+    long long pos = s.offset;
+    while (fgets(buf, sizeof(buf), f)) {
+        size_t n = strlen(buf);
+        apply_log_line(s, buf, now);
+        pos += (long long)n;
+    }
+    s.offset = pos;
+    fclose(f);
+}
+
 
 void Collector::collect() {
     collect_cpu();
@@ -205,6 +277,7 @@ void Collector::collect() {
     char hb[256] = "";
     gethostname(hb, sizeof(hb) - 1);
     host = hb[0] ? hb : "localhost";
+    ip = primary_ip("");   // v2.0
     { std::ifstream f("/proc/uptime"); f >> uptime_s; }
     time_t t = time(nullptr);
     char tb[32];
@@ -212,36 +285,74 @@ void Collector::collect() {
     ts = tb;
 }
 
+// v2.0: суб-рефреш TUI (каждые ~0.5 с): только дешёвые быстрые источники,
+// реалтайв загрузки ядер и LLM-метрик; GPU/диски/сеть — на полном цикле
+void Collector::collect_fast() {
+    collect_cpu();
+    collect_net();
+    collect_llm();
+}
+
 // ---------- CPU ----------
 
 void Collector::collect_cpu() {
-    auto read_stat = [](std::string& line, uint64_t& idle, uint64_t& total) -> bool {
+    struct CpuLine { uint64_t idle, total; };
+    auto read_all = [](std::vector<CpuLine>& per_core, CpuLine& whole) -> bool {
         std::ifstream stat("/proc/stat");
         if (!stat.is_open()) return false;
-        uint64_t user, nice, system, idle_, iowait, irq, softirq, steal;
-        stat >> line >> user >> nice >> system >> idle_ >> iowait >> irq >> softirq >> steal;
-        idle = idle_ + iowait + steal;
-        total = user + nice + system + idle_ + iowait + irq + softirq + steal;
-        return true;
+        std::string line;
+        per_core.clear();
+        whole = {0, 0};
+        while (std::getline(stat, line)) {
+            if (line.compare(0, 3, "cpu") != 0) break;   // cpu-строки идут в начале /proc/stat
+            std::istringstream ls(line);
+            std::string name;
+            uint64_t user, nice, system, idle_, iowait, irq, softirq, steal = 0;
+            if (!(ls >> name >> user >> nice >> system >> idle_ >> iowait >> irq >> softirq >> steal)) continue;
+            CpuLine c;
+            c.idle = idle_ + iowait + steal;
+            c.total = user + nice + system + idle_ + iowait + irq + softirq + steal;
+            if (name == "cpu") whole = c;
+            else per_core.push_back(c);
+        }
+        return whole.total > 0 || !per_core.empty();
     };
 
-    std::string line;
-    uint64_t idle = 0, total = 0;
-
+    std::vector<CpuLine> per_core;
+    CpuLine whole = {0, 0};
+    if (!read_all(per_core, whole)) return;
     if (first_cpu_) {
-        if (!read_stat(line, prev_cpu_idle_, prev_cpu_total_)) return;
+        prev_cpu_idle_ = whole.idle;
+        prev_cpu_total_ = whole.total;
+        prev_core_.clear();
+        for (const auto& c : per_core) prev_core_.push_back({c.idle, c.total});
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        if (!read_stat(line, idle, total)) return;
+        if (!read_all(per_core, whole)) return;
         first_cpu_ = false;
-    } else {
-        if (!read_stat(line, idle, total)) return;
     }
 
-    uint64_t idle_delta = idle - prev_cpu_idle_;
-    uint64_t total_delta = total - prev_cpu_total_;
+    uint64_t idle_delta = whole.idle - prev_cpu_idle_;
+    uint64_t total_delta = whole.total - prev_cpu_total_;
     cpu.usage = (total_delta > 0) ? 100.0 * (1.0 - (double)idle_delta / total_delta) : 0.0;
-    prev_cpu_idle_ = idle;
-    prev_cpu_total_ = total;
+    prev_cpu_idle_ = whole.idle;
+    prev_cpu_total_ = whole.total;
+
+    // v2.0: загрузка каждого ядра (для вертикальных индикаторов)
+    cpu.core_usage.clear();
+    if (prev_core_.size() != per_core.size()) {
+        prev_core_.assign(per_core.size(), {0, 0});
+        cpu.core_usage.assign(per_core.size(), 0.0);   // первый проход — нули
+    } else {
+        for (size_t i = 0; i < per_core.size(); i++) {
+            uint64_t id = per_core[i].idle - prev_core_[i].first;
+            uint64_t tt = per_core[i].total - prev_core_[i].second;
+            double u = (tt > 0) ? 100.0 * (1.0 - (double)id / tt) : 0.0;
+            if (u < 0) u = 0;
+            if (u > 100) u = 100;
+            cpu.core_usage.push_back(u);
+        }
+    }
+    for (size_t i = 0; i < per_core.size(); i++) prev_core_[i] = {per_core[i].idle, per_core[i].total};
 
     cpu.temperature = cpu_temperature();
 
@@ -888,31 +999,31 @@ void Collector::collect_llm() {
             }
             }
         }
-        LogMetrics lm = parse_llm_log(log_path);
-
-        // v1.8: лог llama-server — единственный источник данных.
-        // §6.8c: держим предыдущее значение при недоступности (не обнуляем).
-        if (!lm.any) {
-            llm.gen_tps = -1;          // нет записей в окне лога → «—»
-            llm.prefill_tps = -1;
-            llm.prefill2_tps = -1;
-            // ctx_used / cache_reuse_percent / spec_accept_percent — держим предыдущее
-        } else {
-            if (lm.ctx_used > 0) llm.ctx_used = lm.ctx_used;   // CTX никогда не 0
-            if (lm.spec_accept_percent >= 0) llm.spec_accept_percent = lm.spec_accept_percent;
-            if (!lm.prefill_samples.empty()) {
-                // v1.9: prefill = среднее из последних ≤30 замеров лога (директива Шефа)
-                double sum = 0; size_t n = std::min<size_t>(lm.prefill_samples.size(), 30);
-                for (size_t i = lm.prefill_samples.size() - n; i < lm.prefill_samples.size(); i++)
-                    sum += lm.prefill_samples[i];
-                llm.prefill_tps = sum / (double)n;
+        // v2.0: инкрементальное состояние на каждый файл лога
+        static std::map<std::string, LlmLogState> log_states;
+        if (!log_path.empty()) {
+            LlmLogState& s = log_states[log_path];
+            update_llm_log(s, log_path);
+            llm.ctx_used = s.ctx_used;                     // §6.8c: держим всё время жизни
+            llm.last_task = s.last_task;
+            llm.last_truncated = s.last_truncated;
+            llm.spec_accept_percent = s.spec_accept_percent;
+            llm.cache_reuse_percent = s.cache_reuse_percent;
+            llm.gen_tps = s.gen_tps;                       // при простое — замороженное среднее
+            llm.prefill2_tps = s.prefill2_tps;
+            if (!s.prefill_samples.empty()) {
+                double sum = 0;
+                for (double x : s.prefill_samples) sum += x;
+                llm.prefill_tps = sum / (double)s.prefill_samples.size();
             }
-            // v1.9c: decode gen — держим предыдущее при недоступности
-            if (lm.gen_tps_v > 0) llm.gen_tps = lm.gen_tps_v;
-            if (lm.cache_reuse_percent >= 0) llm.cache_reuse_percent = lm.cache_reuse_percent;
-            if (lm.prefill2_tps_v > 0) llm.prefill2_tps = lm.prefill2_tps_v;   // чистая загрузка prompt
-            if (lm.last_task > 0) llm.last_task = lm.last_task;
-            if (lm.last_truncated >= 0) llm.last_truncated = lm.last_truncated;
+            // v2.0: активная фаза — свежий маркер (tg ~каждые 3 с, prompt processing ~каждые 8 с);
+            // если оба свежие — что произошло позже
+            double now = steady_now();
+            double age_g = now - s.ts_gen, age_p = now - s.ts_prefill;
+            bool on_g = age_g < 6.0, on_p = age_p < 10.0;
+            if (on_g && on_p) llm.active = (age_g <= age_p) ? "gen" : "prefill";
+            else if (on_g) llm.active = "gen";
+            else if (on_p) llm.active = "prefill";
         }
 
         if (llm.ctx_limit > 0)
@@ -921,4 +1032,9 @@ void Collector::collect_llm() {
         llms.push_back(llm);
     }
     closedir(proc);
+
+    // v2.0: главная модель первой — с наибольшим контекстным окном (чат-модели),
+    // эмбеддинги (маленький ctx) — за ними; устойчивый порядок (без прыжков по активности)
+    std::stable_sort(llms.begin(), llms.end(),
+                     [](const LLMStats& a, const LLMStats& b) { return a.ctx_limit > b.ctx_limit; });
 }
