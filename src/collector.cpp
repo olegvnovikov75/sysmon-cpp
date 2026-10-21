@@ -20,6 +20,9 @@ struct glob_t { size_t gl_pathc; char** gl_pathv; };
 #define GLOB_NOSORT 0
 inline int glob(const char*, int, void*, glob_t*) { return 1; } // 1 = нет совпадений
 inline void globfree(glob_t*) {}
+#include <sys/types.h> // ssize_t
+// mingw без readlink — /proc/PID/cwd всё равно недоступен, всегда «не найдено»
+inline ssize_t readlink(const char*, char*, size_t) { return -1; }
 #else
 #include <sys/statvfs.h>
 #include <glob.h>

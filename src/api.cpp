@@ -433,7 +433,12 @@ void ApiServer::loop() {
             char buf[8192];
             size_t n = 0;
             while (n < sizeof(buf) - 1) {
+#ifdef _WIN32
+                // mingw/wine: read() на SOCKET ведёт себя ненадёжно — только recv()
+                int r = recv(cfd, buf + n, (int)(sizeof(buf) - 1 - n), 0);
+#else
                 ssize_t r = read(cfd, buf + n, sizeof(buf) - 1 - n);
+#endif
                 if (r <= 0) break;
                 n += (size_t)r;
                 if (n >= 4 && buf[n-4] == '\r' && buf[n-3] == '\n' &&
@@ -447,11 +452,19 @@ void ApiServer::loop() {
                                "Connection: close\r\n\r\n" + snap;
             size_t off = 0;
             while (off < resp.size()) {
+#ifdef _WIN32
+                int w = send(cfd, resp.data() + off, (int)(resp.size() - off), 0);
+#else
                 ssize_t w = write(cfd, resp.data() + off, resp.size() - off);
+#endif
                 if (w <= 0) break;
                 off += (size_t)w;
             }
+#ifdef _WIN32
+            closesocket(cfd);
+#else
             close(cfd);
+#endif
         }).detach();
     }
 }
@@ -459,7 +472,7 @@ void ApiServer::loop() {
 void ApiServer::stop() {
     run_ = false;
 #ifdef _WIN32
-    if (fd_ >= 0) { shutdown(fd_, SD_BOTH); close(fd_); fd_ = -1; }
+    if (fd_ >= 0) { shutdown(fd_, SD_BOTH); closesocket(fd_); fd_ = -1; }
 #else
     if (fd_ >= 0) { shutdown(fd_, SHUT_RDWR); close(fd_); fd_ = -1; }
 #endif
