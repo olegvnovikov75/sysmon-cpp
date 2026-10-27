@@ -132,6 +132,8 @@ struct LlmLogState {
     double prefill2_tps = -1.0;
     std::deque<double> prefill_samples;         // последние 30 замеров 'prompt processing'
     double ts_gen = -1e18, ts_prefill = -1e18;  // время последнего вида маркеров (steady, с)
+    bool seen = false;                          // v1.11: файл уже встречался
+    unsigned long long ino = 0, dev = 0;        // v1.11: идентификатор файла (смена лога)
 };
 
 static double steady_now() {
@@ -142,8 +144,18 @@ static double steady_now() {
 // Маркер llama-server → обновление состояния. Форматы: классический llama.cpp и
 // unsloth-форк (87G): 'draft acceptance = 0.513 (...)', 'f_sim_best = 0.967' —
 // v2.0 чинит spec accept и cache reuse для 87G (раньше маркеры не совпадали).
+// v1.11 (Шеф 27.10): № задачи из «живых» строк print_timing ('| task 492456 |') —
+// панель видит текущую задачу сразу, а не только после её завершения
+static void note_task_id(LlmLogState& s, const std::string& l) {
+    size_t p = l.find("| task ");
+    if (p == std::string::npos) return;
+    int tv = atoi(l.c_str() + p + 7);
+    if (tv > 0) s.last_task = tv;
+}
+
 static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
     size_t p;
+    note_task_id(s, l);   // v1.11: живой № задачи
     // stop processing — №task, n_tokens (ctx), truncated
     p = l.find("stop processing: n_tokens = ");
     if (p != std::string::npos) {
@@ -246,6 +258,12 @@ static void update_llm_log(LlmLogState& s, const std::string& path) {
     struct stat st0;
     if (stat(path.c_str(), &st0) != 0) return;
     long long sz = (long long)st0.st_size;
+    // v1.11 (Шеф 27.10, закрывает баг 23.10): лог заменён или усечён — сервер
+    // перезапустился. Обнуляем состояние: никаких «вчерашних цифр» мёртвого
+    // сервера; до первой задачи новой жизни — task прочерк, n_t/trnc нули.
+    if (s.seen && (st0.st_ino != s.ino || st0.st_dev != s.dev || sz < s.offset))
+        s = LlmLogState();
+    s.seen = true; s.ino = (unsigned long long)st0.st_ino; s.dev = (unsigned long long)st0.st_dev;
     if (s.offset > sz) s.offset = 0;
     FILE* f = fopen(path.c_str(), "r");
     if (!f) return;

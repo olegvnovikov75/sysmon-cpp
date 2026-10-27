@@ -183,9 +183,12 @@ void render_text(const Collector& c) {
             printf("   cache reuse %5s%%   spec accept %5s%%\n",
                    l.cache_reuse_percent >= 0 ? fmt1(l.cache_reuse_percent).c_str() : "-",
                    l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent).c_str() : "-");
-            if (l.last_task > 0 || l.last_truncated >= 0)
-                printf("       last task %-5d n_tokens %s   trunc %d\n",
-                       l.last_task, fmt_tok(l.ctx_used).c_str(), l.last_truncated);
+            // v1.11 (Шеф 27.10): task/n_t/trnc — только текущие значения;
+            // при отсутствии: task — прочерк (последний), остальные — 0
+            printf("       task %-7s n_t %-6s trnc %d\n",
+                   l.last_task > 0 ? std::to_string(l.last_task).c_str() : "\u2014",
+                   fmt_tok(l.ctx_used).c_str(),
+                   l.last_truncated >= 0 ? l.last_truncated : 0);
         }
     }
     hr();

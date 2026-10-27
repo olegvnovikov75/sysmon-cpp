@@ -435,10 +435,15 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             row.push_back({pb, l.active == "prefill" ? C_ACT : C_TXT});
             box_row(f, row);
         }
-        if (l.last_task > 0 || l.last_truncated >= 0) {
+        // v1.11 (Шеф 27.10): краткие подписи task/n_t/trnc (старые не влезали —
+        // «trunc» обрезалось); значения только текущие, без средних;
+        // при отсутствии данных: task — прочерк (держим последний), n_t/trnc — 0.
+        {
             char tb[64];
-            snprintf(tb, sizeof(tb), "last task %d   n_tokens %s   trunc %d",
-                     l.last_task, fmt_tok(l.ctx_used).c_str(), l.last_truncated);
+            snprintf(tb, sizeof(tb), "task %s   n_t %s   trnc %d",
+                     l.last_task > 0 ? std::to_string(l.last_task).c_str() : "\u2014",
+                     fmt_tok(l.ctx_used).c_str(),
+                     l.last_truncated >= 0 ? l.last_truncated : 0);
             box_row(f, {{tb, C_DIM}});
         }
     }
