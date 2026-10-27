@@ -439,12 +439,17 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
         // «trunc» обрезалось); значения только текущие, без средних;
         // при отсутствии данных: task — прочерк (держим последний), n_t/trnc — 0.
         {
+            // v1.12 (Шеф 27.10): на ходу задача — строка живая и ЖЁЛТАЯ: n_t считается
+            // тем же чтением лога, что tg/progress (прогресс префилла + n_gen), trnc=0
+            // (неизвестно до конца задачи). В паузе: последний task, фактическое
+            // заполнение контекста, trunc завершённой задачи; нет данных — 0/прочерк.
             char tb[64];
+            bool act = l.task_live;
             snprintf(tb, sizeof(tb), "task %s   n_t %s   trnc %d",
                      l.last_task > 0 ? std::to_string(l.last_task).c_str() : "\u2014",
-                     fmt_tok(l.ctx_used).c_str(),
-                     l.last_truncated >= 0 ? l.last_truncated : 0);
-            box_row(f, {{tb, C_DIM}});
+                     fmt_tok(act ? l.task_n_live : l.ctx_used).c_str(),
+                     act ? 0 : (l.last_truncated >= 0 ? l.last_truncated : 0));
+            box_row(f, {{tb, act ? C_ACT : C_DIM}});
         }
     }
 

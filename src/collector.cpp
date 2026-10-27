@@ -126,6 +126,8 @@ struct LlmLogState {
     int ctx_used = 0;
     int last_task = 0;
     int last_truncated = -1;
+    int live_prompt = 0;                // v1.12: подгружено prompt-токенов текущей задачи
+    int live_gen = 0;                   // v1.12: n_gen текущей задачи ('n_gen = G, tg = ...')
     double spec_accept_percent = -1.0;
     double cache_reuse_percent = -1.0;
     double gen_tps = -1.0;
@@ -150,7 +152,11 @@ static void note_task_id(LlmLogState& s, const std::string& l) {
     size_t p = l.find("| task ");
     if (p == std::string::npos) return;
     int tv = atoi(l.c_str() + p + 7);
-    if (tv > 0) s.last_task = tv;
+    if (tv > 0 && tv != s.last_task) {
+        s.last_task = tv;
+        s.live_prompt = 0;   // v1.12: новая задача — живые счётчики с нуля
+        s.live_gen = 0;
+    }
 }
 
 static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
@@ -168,6 +174,10 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
         }
         size_t tr1 = l.find("truncated = ", p);
         if (tr1 != std::string::npos) s.last_truncated = atoi(l.c_str() + tr1 + 11);
+        // v1.12: хвост «живой» строки (жёлтое окно после конца) = точный итог,
+        // без провала в 0; следующая задача обнулит счётчики по новому №.
+        if (v > 0) s.live_prompt = v;
+        s.live_gen = 0;
     }
     // spec accept: 'draft acceptance [rate] = 0.51299 ( 6159 accepted / 12006 generated)'
     p = l.find("draft acceptance");
@@ -182,6 +192,9 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
     // prefill прогресс: 'prompt processing, n_tokens = N, progress = P, t = X s / Y tokens per second'
     p = l.find("prompt processing,");
     if (p != std::string::npos) {
+        // v1.12 (Шеф 27.10): живой n_t — сколько токенов подгружено прямо сейчас
+        size_t nt = l.find("n_tokens = ", p);
+        if (nt != std::string::npos) s.live_prompt = atoi(l.c_str() + nt + 11);
         size_t toks_per_s = l.find("tokens per second", p);
         if (toks_per_s != std::string::npos) {
             size_t c1 = toks_per_s;
@@ -221,6 +234,9 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
     // decode gen — 'tg = X t/s' (при декоде стримится примерно каждые 3 секунды)
     p = l.find("tg = ");
     if (p != std::string::npos) {
+        // v1.12: живые сгенерированные токены той же задачи ('n_gen = G, tg = ...')
+        size_t ng = l.find("n_gen = ");
+        if (ng != std::string::npos) s.live_gen = atoi(l.c_str() + ng + 8);
         size_t c1 = p + 5;
         while (c1 < l.size() && l[c1] == ' ') c1++;
         size_t c2 = c1;
@@ -1045,6 +1061,10 @@ void Collector::collect_llm() {
             if (on_g && on_p) llm.active = (age_g <= age_p) ? "gen" : "prefill";
             else if (on_g) llm.active = "gen";
             else if (on_p) llm.active = "prefill";
+            // v1.12 (Шеф 27.10): строка задачи обновляется ровно в том же цикле
+            // чтения лога, что tg/progress — и красится жёлтым на ходу
+            llm.task_live = !llm.active.empty();
+            llm.task_n_live = s.live_prompt + s.live_gen;
         }
 
         if (llm.ctx_limit > 0)

@@ -139,6 +139,8 @@ std::string collector_to_json(const Collector& c) {
         j += "\"prefill2_tps\":" + jnum(l.prefill2_tps) + ",";       // v1.9: чистая загрузка prompt
         j += "\"last_task\":" + std::to_string(l.last_task) + ",";   // v1.9: №task из лога
         j += "\"last_truncated\":" + std::to_string(l.last_truncated) + ",";
+        j += "\"task_live\":" + std::string(l.task_live ? "1" : "0") + ",";      // v1.12
+        j += "\"task_n_live\":" + std::to_string(l.task_n_live) + ",";
         j += "\"active\":\"" + jesc(l.active) + "\"}";                // v2.0: "gen"|"prefill"|""
     }
     j += "]}";
@@ -390,6 +392,8 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.prefill2_tps = (p2 > 0) ? p2 : ls.prefill2_tps;        // держим предыдущее при недоступности
             ls.last_task = (int)e.getnum("last_task", 0);
             ls.last_truncated = (int)e.getnum("last_truncated", -1);   // v1.9: №task/trunc из лога
+            ls.task_live = e.getnum("task_live", 0) != 0;              // v1.12 (старый удалённый — как пауза)
+            ls.task_n_live = (int)e.getnum("task_n_live", ls.ctx_used);
             ls.active = e.getstr("active");                            // v2.0: gen/prefill/"
             out.llms.push_back(ls);
         }

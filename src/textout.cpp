@@ -185,10 +185,11 @@ void render_text(const Collector& c) {
                    l.spec_accept_percent >= 0 ? fmt1(l.spec_accept_percent).c_str() : "-");
             // v1.11 (Шеф 27.10): task/n_t/trnc — только текущие значения;
             // при отсутствии: task — прочерк (последний), остальные — 0
+            // v1.12 (Шеф 27.10): на ходу — живой n_t (прогресс префилла + n_gen), trnc 0
             printf("       task %-7s n_t %-6s trnc %d\n",
                    l.last_task > 0 ? std::to_string(l.last_task).c_str() : "\u2014",
-                   fmt_tok(l.ctx_used).c_str(),
-                   l.last_truncated >= 0 ? l.last_truncated : 0);
+                   fmt_tok(l.task_live ? l.task_n_live : l.ctx_used).c_str(),
+                   l.task_live ? 0 : (l.last_truncated >= 0 ? l.last_truncated : 0));
         }
     }
     hr();

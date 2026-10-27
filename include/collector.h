@@ -99,6 +99,8 @@ struct LLMStats {
     double prefill2_tps = -1.0;         // v1.9: prefill из 'prompt eval time' (генерация/короткий prompt), отдельно от загрузки
     int last_task = 0;                  // v1.9: №task из 'stop processing' (последний в окне лога)
     int last_truncated = -1;            // v1.9: truncated из 'stop processing'
+    int task_n_live = 0;                // v1.12: живой n_t текущей задачи (прогресс префилла + n_gen)
+    bool task_live = false;             // v1.12: задача идёт прямо сейчас (строка жёлтая)
     std::string active;                 // v2.0: "gen" | "prefill" | "" — что модель делает СЕЙЧАС
 };
 
