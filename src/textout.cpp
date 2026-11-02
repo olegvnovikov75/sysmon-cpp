@@ -113,6 +113,7 @@ void render_text(const Collector& c) {
                        g.temperature, col.rst);
             if (g.clock_mhz >= 0) printf("  %.0f MHz", g.clock_mhz);
             if (g.power_watts >= 0) printf("  %.0f W", g.power_watts);
+            if (!g.pcie.empty()) printf("  %s", g.pcie.c_str());   // v2.2: как карта подключена
             printf("\n");
         }
     }
@@ -153,6 +154,14 @@ void render_text(const Collector& c) {
             else
                 printf("  %s%-8s%s %-4s %6.1f Gb%s\n",
                        col.bold, d.name.c_str(), col.rst, d.type.c_str(), d.size_gb, md.c_str());
+            // v2.2: активность диска — детектор «модель лезет на NVMe» (дельты /proc/diskstats)
+            {
+                double r = d.read_mbs > 0 ? d.read_mbs : 0.0;
+                double w = d.write_mbs > 0 ? d.write_mbs : 0.0;
+                if (r + w > 0.05 || d.busy_percent > 2.0)
+                    printf("          r %6.1f MB/s  w %6.1f MB/s   busy %3.0f%%\n", r, w,
+                           d.busy_percent > 0 ? d.busy_percent : 0.0);
+            }
         }
     }
 
@@ -160,13 +169,15 @@ void render_text(const Collector& c) {
     if (!c.llms.empty()) {
         hr();
         for (const auto& l : c.llms) {
+            // v2.2 (Шеф 02.11): Strata подписывается своим именем, llama остаётся LLM
+            const char* eng = (l.engine == "strata") ? "Strata" : "LLM";
             if (l.ctx_percent >= 0)
-                printf("  %sLLM%s  port %5d  %-32s  ctx %3.0f%% (%s/%s tok)\n",
-                       col.bold, col.rst, l.port, l.model_name.c_str(),
+                printf("  %s%s%s  port %5d  %-32s  ctx %3.0f%% (%s/%s tok)\n",
+                       col.bold, eng, col.rst, l.port, l.model_name.c_str(),
                        l.ctx_percent, fmt_tok(l.ctx_used).c_str(), fmt_tok(l.ctx_limit).c_str());
             else
-                printf("  %sLLM%s  port %5d  %-32s  ctx —\n",
-                       col.bold, col.rst, l.port, l.model_name.c_str());
+                printf("  %s%s%s  port %5d  %-32s  ctx \u2014\n",
+                       col.bold, eng, col.rst, l.port, l.model_name.c_str());
             // v2.0: разбор printa поправлен — аргументы стояли НЕ на своих местах
             // (cache reuse печатал prefill2, spec accept — cache, spec — висячим %s).
             // Теперь: decode gen | prefill upl./gen. — как в TUI; плюс ACTIVE-тег.
@@ -190,6 +201,12 @@ void render_text(const Collector& c) {
                    l.last_task > 0 ? std::to_string(l.last_task).c_str() : "\u2014",
                    fmt_tok(l.task_live ? l.task_n_live : l.ctx_used).c_str(),
                    l.task_live ? 0 : (l.last_truncated >= 0 ? l.last_truncated : 0));
+            // v2.2: MOE-размещение (Strata) и RAM/своп процесса модели
+            if (!l.moe.empty())
+                printf("       %sMOE  %s%s\n", col.dim, l.moe.c_str(), col.rst);
+            if (l.rss_gb >= 0)
+                printf("       %smem  RAM %5.1f Gb  swap %4.1f Gb%s\n", col.dim,
+                       l.rss_gb, l.swap_gb >= 0 ? l.swap_gb : 0.0, col.rst);
         }
     }
     hr();

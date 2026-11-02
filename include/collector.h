@@ -6,6 +6,7 @@
 #include <map>
 #include <deque>
 #include <cstdint>
+#include <tuple>
 
 struct CPUStats {
     double usage = 0.0;
@@ -28,6 +29,7 @@ struct GPUStats {
     int index = 0;
     std::string name;
     std::string vendor;          // "nvidia" | "amd"
+    std::string pcie;            // v2.1: статика канала — "PCIe1 x16 (max 3 x16)" (пусто = нет данных)
     double utilization = -1.0;   // -1 = n/a
     double vram_used_gb = 0.0;
     double vram_total_gb = 0.0;
@@ -48,6 +50,9 @@ struct DiskStats {
     double used_gb = -1.0;  // -1 = не определено (нет ФС на диске)
     double total_gb = 0.0;
     double usage_percent = -1.0;
+    double read_mbs = -1.0;   // v2.1: MB/s чтение (дельта /proc/diskstats; -1 = первый кадр)
+    double write_mbs = -1.0;  // v2.1: MB/s запись
+    double busy_percent = -1.0; // v2.1: % времени диск был занят IO
     bool by_partitions = false; // нет смонтированной ФС — занятость по партициям
     std::string fs;            // типы ФС на партициях (blkid), напр. "ntfs"
     std::string model;     // из sysfs (может быть пуст)
@@ -88,6 +93,7 @@ struct NetStats {
 // busy_slots/requests_processing/metrics_ok убраны
 struct LLMStats {
     int port = 0;
+    std::string engine = "llama";      // v2.1: "llama" | "strata" — движок (заголовок панели)
     std::string model_name;
     int ctx_limit = 0;           // из cmdline: -c / --ctx-size (0 = не задано)
     int ctx_used = 0;            // лог: 'stop processing: n_tokens = X'
@@ -102,6 +108,11 @@ struct LLMStats {
     int task_n_live = 0;                // v1.12: живой n_t текущей задачи (прогресс префилла + n_gen)
     bool task_live = false;             // v1.12: задача идёт прямо сейчас (строка жёлтая)
     std::string active;                 // v2.0: "gen" | "prefill" | "" — что модель делает СЕЙЧАС
+    // v2.1: RSS/VmSwap процесса модели (/proc/PID/status; -1 = недоступно, напр. root-контейнер)
+    double rss_gb = -1.0;
+    double swap_gb = -1.0;
+    // v2.1: MOE-размещение (Strata, из engine-лога при старте; пусто = нет данных)
+    std::string moe;                    // готовая строка: "experts 24576/24576 on GPU · CPU-prefill off · VRAM free 1.3 Gb"
 };
 
 class Collector {
@@ -133,6 +144,10 @@ private:
     std::vector<std::pair<uint64_t, uint64_t>> prev_core_;   // v2.0: (idle,total) по ядрам
     double prev_net_ts_ = 0.0;
     std::map<std::string, std::pair<uint64_t, uint64_t>> prev_net_;  // iface -> (rx,tx)
+    // v2.1: дельты /proc/diskstats — disk -> (rsector, wsector, io_ms, wall)
+    // v2.2: диск — прошлый кадр для дельт: sectors_read, sectors_written, io_ms,
+    // steady-время, и флаг «есть ли поле busy» (1/−1)
+    std::map<std::string, std::tuple<uint64_t, uint64_t, uint64_t, double, double>> prev_disk_;
 
 
 

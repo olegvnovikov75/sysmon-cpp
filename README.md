@@ -16,8 +16,9 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 |---|---|---|
 | **CPU** | модель (в заголовке), загрузка % (бар), температура (бар), load 1/5/15, ядра | `/proc/cpuinfo`, `/proc/stat`, `/proc/loadavg`, thermal_zone / hwmon (k10temp, coretemp) / `sensors` |
 | **RAM** | занято/всего GiB, %, swap | `/proc/meminfo` |
-| **GPU** (NVIDIA + AMD, все карты) | util % (бар), VRAM GiB, температура (бар), clock MHz, power W | `nvidia-smi` (CSV), `/sys/class/drm/*/device` + hwmon (amdgpu) |
-| **LLM** (все llama-server) | порт, модель, ctx % (бар, занято/лимит tok), cache reuse % (бар), spec accept % (бар), gen tok/s, prefill tok/s — **всё из лога llama-server** (serverlog.txt, скользящее окно 500 строк; единственный источник данных, v1.8) | `/proc/*/cmdline` + парсинг `serverlog.txt` |
+| **GPU** (NVIDIA + AMD, все карты) | util % (бар), VRAM GiB, температура (бар), clock MHz, power W, **PCIe-линия** (`PCIe4 x16`, справочная статика) | `nvidia-smi` (CSV), `/sys/class/drm/*/device` + hwmon (amdgpu), `/sys/bus/pci/devices/*/current_link_speed|width` + `max_link_*` |
+| **LLM** (llama-server **и** Strata) | заголовок `LLM : порт — модель` / `Strata : порт — модель`, ctx % (бар, занято/лимит tok), cache reuse % (бар), spec accept % (бар), gen tok/s, prefill tok/s, задача (№task / n_t / trnc), **mem RAM/swap процесса модели**, **MOE-размещение** (Strata) — **всё из логов движка** | `/proc/*/cmdline` (в т.ч. контейнерный `llama-server` через cgroup), Strata — `~/.local/state/strata/launch/*.json` + engine.log/server.log; RSS/Swap — `VmRSS`/`VmSwap` из `/proc/PID/status` |
+| **Disks** | целые диски: тип (HDD/SSD/NVMe), размер GiB, модель, **занятость ФС** (used/total GiB, %, бар), **io-строка** (↓ чтение / ↑ запись MB/s + busy %) — появляется только когда диск реально дёргают | `/sys/block/*` (size, queue/rotational, device/model), `/sys/class/nvme/*/model`, `/proc/mounts` + `statvfs` (занятость, вкл. LVM), `/proc/diskstats` (дельты секторов и «ms doing I/O») |
 | **Network** | rx/tx MB/s по каждому активному интерфейсу | `/sys/class/net/*/statistics` (дельты) |
 | **Disks** | целые диски: тип (HDD/SSD/NVMe), размер GiB, модель, **занятость ФС** (used/total GiB, %, бар) | `/sys/block/*` (size, queue/rotational, device/model), `/sys/class/nvme/*/model`, `/proc/mounts` + `statvfs` (занятость, вкл. LVM) |
 | **Sensors** | температуры hwmon-датчиков с барами (NVMe, сетевые PHY/MAC и др.) | `/sys/class/hwmon/*` |
@@ -169,6 +170,20 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 - **Сеть:** показываются только интерфейсы в `operstate=up`, без lo/veth/br-/docker/tailscale.
 
 ## Релизы
+- **v2.2** (02.11.2026) — диагностика Strata (MOE-движок) без потери совместимости с llama.cpp:
+  заголовок `Strata : порт — модель`, порты/имя модели/пути логов из launch-JSON
+  (`~/.local/state/strata/launch/*.json`), мёрж engine.log (итоги запроса, старт-конфиг MOE)
+  и server.log (живые строки) с раздельными offset/inode; поддержка чисел с разделителями
+  тысяч (`24,030`); строка `MOE` — эксперты/размещение, CPU-prefill, expert cache GiB, VRAM free
+  (перенос по `·` в узкой панели, без обрезки); `mem RAM/swap` процесса модели (`VmRSS`/`VmSwap`);
+  GPU: справочная PCIe-линия (`PCIe1..6 xN`, из sysfs `current/max_link_speed|width`, кэш по индексу);
+  Disks: io-строка ↓/↑ MB/s + busy % из дельт `/proc/diskstats`, строка показывается только при
+  активности; fix: RSS для моделей в docker (`docker run` на хосте → берётся процесс контейнера с
+  max RSS, cgroup v2 `docker-…​.scope` распознаётся); fix: парсер expert cache брал число слотов
+  вместо GiB (было `24576.0 Gb`); JSON: `gpus[].pcie`, `llms[].engine|moe|rss_gb|swap_gb`,
+  `disks[].read_mbs|write_mbs|busy_percent` (старые серверы читаются без падений, новое — пусто/−1).
+  Примечание: на части ядер (blk-mq/NVMe, ядро 6.8 на X99) счётчик «ms doing I/O» не двигается при
+  честном трафике — в этом случае busy % показывается как `—` (unknown), а не как `0%`.
 - **v2.0** (21.10.2026) — переработан layout по директиве Шефа: порядок секций CPU→GPU→LLM→
   Sensors→Disks→Network; ни одна строка не длиннее панели (кламп, без переносов) — рамки целы при
   любом resize; `KEY_RESIZE` мгновенный; индикаторы загрузки ядер `▁▂▃▄▅▆▇█`; RAM строкой в CPU-блоке

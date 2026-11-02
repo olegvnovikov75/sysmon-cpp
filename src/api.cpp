@@ -84,6 +84,7 @@ std::string collector_to_json(const Collector& c) {
         j += "{\"index\":" + jnum(g.index) + ",";
         j += "\"name\":\"" + jesc(g.name) + "\",";
         j += "\"vendor\":\"" + jesc(g.vendor) + "\",";
+        j += "\"pcie\":\"" + jesc(g.pcie) + "\",";          // v2.2: статика канала (x4/x16)
         j += "\"utilization\":" + jnum(g.utilization) + ",";
         j += "\"vram_used_gb\":" + jnum(g.vram_used_gb) + ",";
         j += "\"vram_total_gb\":" + jnum(g.vram_total_gb) + ",";
@@ -107,6 +108,9 @@ std::string collector_to_json(const Collector& c) {
         j += "\"used_gb\":" + jnum(d.used_gb) + ",";
         j += "\"total_gb\":" + jnum(d.total_gb) + ",";
         j += "\"usage_percent\":" + jnum(d.usage_percent) + ",";
+        j += "\"read_mbs\":" + jnum(d.read_mbs) + ",";             // v2.2: трафик и занятость
+        j += "\"write_mbs\":" + jnum(d.write_mbs) + ",";
+        j += "\"busy_percent\":" + jnum(d.busy_percent) + ",";
         j += "\"by_partitions\":" + std::string(d.by_partitions ? "true" : "false") + ",";
         j += "\"fs\":\"" + jesc(d.fs) + "\",";
         j += "\"model\":\"" + jesc(d.model) + "\"}";
@@ -128,6 +132,7 @@ std::string collector_to_json(const Collector& c) {
         const auto& l = c.llms[i];
         if (i) j += ",";
         j += "{\"port\":" + jnum(l.port) + ",";
+        j += "\"engine\":\"" + jesc(l.engine) + "\",";            // v2.2: llama | strata
         j += "\"model_name\":\"" + jesc(l.model_name) + "\",";
         j += "\"ctx_limit\":" + jnum(l.ctx_limit) + ",";
         j += "\"ctx_used\":" + jnum(l.ctx_used) + ",";
@@ -141,7 +146,10 @@ std::string collector_to_json(const Collector& c) {
         j += "\"last_truncated\":" + std::to_string(l.last_truncated) + ",";
         j += "\"task_live\":" + std::string(l.task_live ? "1" : "0") + ",";      // v1.12
         j += "\"task_n_live\":" + std::to_string(l.task_n_live) + ",";
-        j += "\"active\":\"" + jesc(l.active) + "\"}";                // v2.0: "gen"|"prefill"|""
+        j += "\"active\":\"" + jesc(l.active) + "\",";               // v2.0: "gen"|"prefill"|""
+        j += "\"rss_gb\":" + jnum(l.rss_gb) + ",";                   // v2.2: RAM/своп процесса модели
+        j += "\"swap_gb\":" + jnum(l.swap_gb) + ",";
+        j += "\"moe\":\"" + jesc(l.moe) + "\"}";                     // v2.2: куда легли эксперты (Strata)
     }
     j += "]}";
     return j;
@@ -324,6 +332,7 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             s.index = (int)e.getnum("index", 0);
             s.name = e.getstr("name");
             s.vendor = e.getstr("vendor");
+            s.pcie = e.getstr("pcie");            // v2.2 (у старых серверов — пусто)
             s.utilization = e.getnum("utilization", -1);
             s.vram_used_gb = e.getnum("vram_used_gb", 0);
             s.vram_total_gb = e.getnum("vram_total_gb", 0);
@@ -352,6 +361,9 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ds.used_gb = e.getnum("used_gb", -1);
             ds.total_gb = e.getnum("total_gb", 0);
             ds.usage_percent = e.getnum("usage_percent", -1);
+            ds.read_mbs = e.getnum("read_mbs", -1);          // v2.2
+            ds.write_mbs = e.getnum("write_mbs", -1);
+            ds.busy_percent = e.getnum("busy_percent", -1);
             ds.by_partitions = e.getnum("by_partitions", 0) > 0.5;
             ds.fs = e.getstr("fs");
             ds.model = e.getstr("model");
@@ -377,6 +389,8 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
         for (const auto& e : l->arr) {
             LLMStats ls;
             ls.port = (int)e.getnum("port", 0);
+            ls.engine = e.getstr("engine");       // v2.2 (у старых серверов пусто → llama)
+            if (ls.engine.empty()) ls.engine = "llama";
             ls.model_name = e.getstr("model_name");
             ls.ctx_limit = (int)e.getnum("ctx_limit", 0);
             ls.ctx_used = (int)e.getnum("ctx_used", 0);
@@ -395,6 +409,9 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.task_live = e.getnum("task_live", 0) != 0;              // v1.12 (старый удалённый — как пауза)
             ls.task_n_live = (int)e.getnum("task_n_live", ls.ctx_used);
             ls.active = e.getstr("active");                            // v2.0: gen/prefill/"
+            ls.rss_gb = e.getnum("rss_gb", -1);                        // v2.2
+            ls.swap_gb = e.getnum("swap_gb", -1);
+            ls.moe = e.getstr("moe");
             out.llms.push_back(ls);
         }
 

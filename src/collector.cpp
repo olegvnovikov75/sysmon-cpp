@@ -136,6 +136,14 @@ struct LlmLogState {
     double ts_gen = -1e18, ts_prefill = -1e18;  // время последнего вида маркеров (steady, с)
     bool seen = false;                          // v1.11: файл уже встречался
     unsigned long long ino = 0, dev = 0;        // v1.11: идентификатор файла (смена лога)
+    // v2.2: Strata MOE — куда легли эксперты (печатаются ОДИН РАЗ при старте,
+    // поэтому живут в состоянии лога, а не в «свежих» метриках)
+    int moe_resident = 0;                       // резидентных экспертов
+    int moe_total = 0;                          // всего экспертов (0 = неизвестно)
+    std::string moe_place;                      // "GPU" | "host"
+    int moe_cpu_prefill = -1;                   // -1 неизвестно, 0 выключен, 1 включён
+    double moe_cache_gib = -1.0;                // размер expert cache
+    double moe_vram_free_mib = -1.0;            // свободный остаток VRAM
 };
 
 static double steady_now() {
@@ -226,9 +234,139 @@ static void note_task_id(LlmLogState& s, const std::string& l) {
     }
 }
 
+// v2.2: Strata MOE — куда легли эксперты и как они считаются. Строки вида:
+//   'expert cache 24576 slots, 46.84 GiB of VRAM'
+//   'R4 hit path ON - resident experts are computed on the GPU'
+//   'token graph hit path: 24576 resident experts, decided on the device'
+//   'every expert is in the GPU cache (24576 of 24576): the CPU prefill share … not armed'
+//   '1300 MiB of VRAM free with everything loaded'
+static void apply_moe_line(LlmLogState& s, const std::string& l) {
+    size_t p, q;
+    if ((p = l.find("resident experts")) != std::string::npos) {
+        double n = parse_num_before(l, p);
+        if (n > 0) s.moe_resident = (int)n;
+        if (l.find("computed on the GPU") != std::string::npos) s.moe_place = "GPU";
+        else if (l.find("on the host") != std::string::npos ||
+                 l.find("host memory") != std::string::npos) s.moe_place = "host";
+    }
+    if ((p = l.find("expert is in the GPU cache")) != std::string::npos) {
+        s.moe_place = "GPU";
+        q = l.find('(', p);
+        if (q != std::string::npos) {
+            double a = parse_num_at(l, q + 1);
+            double b = parse_num_at(l, l.find("of ", q));
+            if (a > 0) s.moe_resident = (int)a;
+            if (b > 0) s.moe_total = (int)b;
+        }
+        if (l.find("not armed") != std::string::npos) s.moe_cpu_prefill = 0;
+        else if (l.find("CPU prefill share") != std::string::npos) s.moe_cpu_prefill = 1;
+    }
+    if (l.find("hit path ON") != std::string::npos && s.moe_place.empty()) s.moe_place = "GPU";
+    if ((p = l.find("expert cache ")) != std::string::npos &&
+        (q = l.find(" GiB of VRAM", p)) != std::string::npos) {
+        // «expert cache 24576 slots, 46.84 GiB of VRAM» — размер берётся ПЕРЕД «GiB»,
+        // а не первый номер после «cache» (там число слотов)
+        double g = parse_num_before(l, q);
+        if (g > 0) s.moe_cache_gib = g;
+    }
+    if ((p = l.find("MiB of VRAM free")) != std::string::npos) {
+        double m = parse_num_before(l, p);
+        // «with everything loaded» — итоговая цифра, её держим приоритетно
+        if (m > 0 && (s.moe_vram_free_mib < 0 || l.find("everything loaded") != std::string::npos))
+            s.moe_vram_free_mib = m;
+    }
+}
+
+// v2.2: память процесса модели — VmRSS/VmSwap из /proc/PID/status (-1 = недоступно,
+// напр. процесс принадлежит другому пользователю и закрыт)
+static bool read_status_vm(long pid, double& rss_gb, double& swap_gb) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/status", pid);
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+    std::string line;
+    bool ok = false;
+    rss_gb = -1.0; swap_gb = -1.0;
+    while (std::getline(f, line)) {
+        if (line.rfind("VmRSS:", 0) == 0) { rss_gb = parse_num_at(line, 0) / (1024.0 * 1024.0); ok = true; }
+        else if (line.rfind("VmSwap:", 0) == 0) { swap_gb = parse_num_at(line, 0) / (1024.0 * 1024.0); }
+    }
+    return ok;
+}
+
+// v2.2: docker-ран (agentionai, 87G): на хосте стоит КЛИЕНТ `docker run`, его RSS
+// ничего не показывает. Процесс модели ищем среди процессов КОНТЕЙНЕРА:
+// cgroup v2 — скоуп «docker-<id>.scope», v1 — путь «/docker/<id>». Берём того, у кого
+// больше RAM: внутри контейнера модель — самый большой процесс по определению.
+// (daemon'ы dockerd/containerd в эти скоупы не попадают — у них «docker.service».)
+static std::string cgroup_of(long pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/cgroup", pid);
+    std::ifstream f(path);
+    std::string line, best;
+    while (std::getline(f, line)) {
+        size_t c = line.find(':');
+        if (c == std::string::npos) continue;
+        std::string p = trim(line.substr(c + 1));
+        if (p.find("docker-") != std::string::npos || p.find("/docker/") != std::string::npos) {
+            best = p; break;                      // скоуп контейнера — то, что нужно
+        }
+        if (best.empty()) best = p;
+    }
+    return best;
+}
+
+static bool is_container_cgroup(const std::string& cg) {
+    return cg.find("docker-") != std::string::npos || cg.find("/docker/") != std::string::npos;
+}
+
+static long member_with_max_rss(long hint_pid) {
+    (void)hint_pid;                                // клиент docker run сам ВНЕ скоупа контейнера,
+                                                   // поэтому ищем по всем контейнерным процессам
+    DIR* proc = opendir("/proc");
+    if (!proc) return -1;
+    long best = -1;
+    double best_rss = -1.0;
+    struct dirent* e;
+    while ((e = readdir(proc)) != NULL) {
+        char* end;
+        long pid = strtol(e->d_name, &end, 10);
+        if (*end != '\0' || pid < 1) continue;
+        if (!is_container_cgroup(cgroup_of(pid))) continue;
+        double r = -1, s = -1;
+        if (!read_status_vm(pid, r, s) || r < 0) continue;
+        if (r > best_rss) { best_rss = r; best = pid; }
+    }
+    closedir(proc);
+    return best;
+}
+
+// v2.2: готовая строка MOE для панели (из строк старта engine-лога Strata)
+static std::string build_moe_line(const LlmLogState& s) {
+    std::string out;
+    auto add = [&](const std::string& part) { out += (out.empty() ? "" : "  \u00b7  ") + part; };
+    if (s.moe_resident > 0) {
+        std::string t = "experts " + std::to_string(s.moe_resident);
+        if (s.moe_total > 0) t += "/" + std::to_string(s.moe_total);
+        if (!s.moe_place.empty()) t += " on " + s.moe_place;
+        add(t);
+    }
+    if (s.moe_cpu_prefill >= 0) add(std::string("CPU-prefill ") + (s.moe_cpu_prefill ? "on" : "off"));
+    if (s.moe_cache_gib > 0) {
+        char b[32]; snprintf(b, sizeof(b), "cache %.1f Gb", s.moe_cache_gib);
+        add(b);
+    }
+    if (s.moe_vram_free_mib > 0) {
+        char b[32]; snprintf(b, sizeof(b), "VRAM free %.1f Gb", s.moe_vram_free_mib / 1024.0);
+        add(b);
+    }
+    return out;
+}
+
 static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
     size_t p;
     note_task_id(s, l);   // v1.11: живой № задачи
+    apply_moe_line(s, l); // v2.2: MOE-разметка Strata
     // stop processing — №task, n_tokens (ctx), truncated
     p = l.find("stop processing: n_tokens = ");
     if (p != std::string::npos) {
@@ -685,6 +823,56 @@ static std::string amd_gpu_name(const std::string& card) {
     return dev.empty() ? "AMD GPU" : dev;
 }
 
+// v2.2: как карта подключена к шине (статика при старте — не живой мониторинг).
+// Читаем sysfs (без root работает): current_link_speed/width + max_*.
+// Формат: "PCIe1 x16" — ширина и поколение; если ширина меньше максимальной —
+// добавляем "(max x8)": видно, что карта в слоте сидит кривее, чем умеет.
+static std::string pcie_link_desc(const std::string& dev_dir) {
+    auto rd = [&](const char* f) -> std::string {
+        std::ifstream in(dev_dir + "/" + f);
+        std::string v; std::getline(in, v);
+        return trim(v);
+    };
+    std::string spd = rd("current_link_speed");       // "8.0 GT/s PCIe"
+    std::string wid = rd("current_link_width");       // "16"
+    if (wid.empty()) return "";
+    std::string maxw = rd("max_link_width");
+    std::string maxs = rd("max_link_speed");
+    // поколения PCIe по скорости линии (GT/s на линию: 1→2.5, 2→5, 3→8, 4→16, 5→32, 6→64)
+    auto gen_of = [](const std::string& s) -> std::string {
+        if (s.find("2.5") == 0) return "1";
+        if (s.find("5.0") == 0) return "2";
+        if (s.find("8.0") == 0) return "3";
+        if (s.find("16.0") == 0) return "4";
+        if (s.find("32.0") == 0) return "5";
+        if (s.find("64.0") == 0) return "6";
+        return "";
+    };
+    // справка — ВОЗМОЖНОСТИ слота: на X99 у CMP 170HX в простое линия уезжает в 2.5 GT/s,
+    // поэтому поколение берём из max_link_speed (если есть), а не из текущего
+    std::string gen = gen_of(!maxs.empty() ? maxs : spd);
+    std::string cgen = gen_of(spd);
+    std::string out = "PCIe" + (gen.empty() ? "?" : gen) + " x" + wid;
+    if (!maxw.empty() && maxw != wid) out += " (max x" + maxw + ")";
+    if (!cgen.empty() && !gen.empty() && cgen != gen)
+        out += " \u00b7 now g" + cgen;                  // простой/энергосбережение: линия тише
+    return out;
+}
+
+// v2.2: адрес шины у NVIDIA (nvidia-smi пишет домен 8-значным: 00000000:04:00.0,
+// в sysfs он 4-значный: 0000:04:00.0)
+static std::string pci_dev_dir_from_busid(const std::string& busid) {
+    size_t c1 = busid.find(':');
+    if (c1 == std::string::npos) return "";
+    std::string dom = busid.substr(0, c1);
+    while (dom.size() > 4 && dom[0] == '0') dom = dom.substr(1);
+    if (dom.empty()) dom = "0000";
+    std::string dir = "/sys/bus/pci/devices/" + dom + busid.substr(c1);   // ":04:00.0"
+    struct stat st;
+    if (stat(dir.c_str(), &st) != 0) return "";
+    return dir;
+}
+
 void Collector::collect_gpu() {
     gpus.clear();
 
@@ -772,6 +960,39 @@ void Collector::collect_gpu() {
             }
             closedir(drm);
         }
+    }
+
+    // v2.2: PCIe-статика — «как карта воткнута» (ширина/поколение). Считается ОДИН РАЗ
+    // на индекс: это не живая метрика, а справка при старте (Шеф 02.11)
+    for (auto& g : gpus) {
+        static std::map<int, std::string> cache;
+        auto it = cache.find(g.index);
+        if (it == cache.end()) {
+            std::string dir;
+            if (g.vendor == "nvidia") {
+                std::string q = "nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader";
+#ifndef _WIN32
+                q += " 2>/dev/null";
+#endif
+                FILE* b = popen(q.c_str(), "r");
+                if (b) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), b)) {
+                        int idx = -1; char bus[128] = "";
+                        if (sscanf(line, "%d, %127[^\n]", &idx, bus) == 2 && idx == g.index)
+                            dir = pci_dev_dir_from_busid(trim(bus));
+                    }
+                    pclose(b);
+                }
+            } else {
+                char path[256];
+                snprintf(path, sizeof(path), "/sys/class/drm/card%d/device", g.index);
+                struct stat st;
+                if (stat(path, &st) == 0) dir = path;
+            }
+            it = cache.emplace(g.index, dir.empty() ? std::string() : pcie_link_desc(dir)).first;
+        }
+        g.pcie = it->second;
     }
 }
 
@@ -945,6 +1166,30 @@ static void disk_usage(const std::string& disk, double& used_gb, double& total_g
     }
 }
 
+// v2.2: трафик и занятость диска — /proc/diskstats (счётчики с старта, берём дельты).
+// Поля после имени: reads merged rsect ms_r writes merged wsect ms_w discards merged
+// sdisc ms_d flush inflight io_ms weighted…; io_ms = время, пока диск был занят.
+static bool diskstats_lookup(const std::string& name,
+                             uint64_t& rsec, uint64_t& wsec, uint64_t& io_ms, bool& have_busy) {
+    std::ifstream f("/proc/diskstats");
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ls(line);
+        std::string maj, min, dev;                 // ФОРМАТ: «maj min NAME …» — имя ТРЕТИЙ токен
+        if (!(ls >> maj >> min >> dev) || dev != name) continue;
+        uint64_t v[18] = {0};
+        int n = 0;
+        while (n < 18 && (ls >> v[n])) n++;
+        if (n < 8) return false;
+        rsec = v[2];                               // sectors read
+        wsec = v[6];                               // sectors written
+        have_busy = (n >= 16);                     // v[15] = «ms doing I/O» (накопительно)
+        io_ms = have_busy ? v[15] : 0;
+        return true;
+    }
+    return false;
+}
+
 void Collector::collect_disks() {
     disks.clear();
     DIR* d = opendir("/sys/block");
@@ -998,8 +1243,7 @@ void Collector::collect_disks() {
         dk.model = model;
 
         // занятость ФС на диске (прямые партиции + LVM)
-        double ug = 0, tg = 0, pfg = 0;
-        std::string fsn;
+        double ug = 0, tg = 0, pfg = 0;        std::string fsn;
         disk_usage(name, ug, tg, pfg, fsn);
         if (tg > 0) {
             dk.used_gb = ug; dk.total_gb = tg; dk.usage_percent = 100.0 * ug / tg;
@@ -1011,6 +1255,34 @@ void Collector::collect_disks() {
             dk.used_gb = pfg;
             dk.total_gb = dk.size_gb;
             dk.usage_percent = dk.size_gb > 0 ? 100.0 * pfg / dk.size_gb : 0.0;
+        }
+
+        // v2.2: пропускная способность и занятость (дельты между кадрами)
+        {
+            uint64_t rs = 0, ws = 0, io = 0;
+            bool have_busy = false;
+            if (diskstats_lookup(name, rs, ws, io, have_busy)) {
+                double now = steady_now();
+                auto it = prev_disk_.find(name);
+                if (it != prev_disk_.end() && have_busy && std::get<4>(it->second) >= 0) {
+                    double dt = now - std::get<3>(it->second);
+                    if (dt > 0.05) {
+                        uint64_t prs = std::get<0>(it->second), pws = std::get<1>(it->second);
+                        uint64_t pio = std::get<2>(it->second);
+                        dk.read_mbs  = (rs >= prs ? rs - prs : 0) * 512.0 / (1024.0 * 1024.0) / dt;
+                        dk.write_mbs = (ws >= pws ? ws - pws : 0) * 512.0 / (1024.0 * 1024.0) / dt;
+                        if (io >= pio)
+                            dk.busy_percent = 100.0 * (double)(io - pio) / (dt * 1000.0);
+                        if (dk.busy_percent > 100.0) dk.busy_percent = 100.0;
+                        // v2.2c: на некоторых ядрах (blk-mq/NVMe, 6.8 на X99) счётчик
+                        // «ms doing I/O» не двигается даже при 700 MB/s. Врать «0%» нельзя —
+                        // помечаем как неизвестно («—»), MB/s при этом честные.
+                        if (io == pio && (dk.read_mbs > 0.05 || dk.write_mbs > 0.05))
+                            dk.busy_percent = -1.0;
+                    }
+                }
+                prev_disk_[name] = {rs, ws, io, now, have_busy ? 1.0 : -1.0};
+            }
         }
 
         disks.push_back(dk);
@@ -1211,7 +1483,8 @@ void Collector::collect_llm() {
 
         LLMStats llm;
         llm.port = port;
-        llm.model_name = model.empty() ? "(без имени)" : model;
+        llm.engine = is_strata ? "strata" : "llama";   // v2.2: заголовок панели
+        llm.model_name = model.empty() ? "(\u0431\u0435\u0437 \u0438\u043c\u0435\u043d\u0438)" : model;
         llm.ctx_limit = ctx_limit;
 
         // v1.7: лог-файл из cmdline: --log / -l / LOG_FILE рядом с -m (basename → cwd процесса)
@@ -1264,6 +1537,13 @@ void Collector::collect_llm() {
                 const LlmLogState& fresh = (act_v >= act_e) ? v : e;
                 s.live_prompt = fresh.live_prompt;
                 s.live_gen = fresh.live_gen;
+                // v2.2: MOE-разметка — из engine-лога (server-лог её не печатает)
+                s.moe_resident = e.moe_resident ? e.moe_resident : v.moe_resident;
+                s.moe_total = e.moe_total ? e.moe_total : v.moe_total;
+                s.moe_place = !e.moe_place.empty() ? e.moe_place : v.moe_place;
+                s.moe_cpu_prefill = (e.moe_cpu_prefill >= 0) ? e.moe_cpu_prefill : v.moe_cpu_prefill;
+                s.moe_cache_gib = (e.moe_cache_gib > 0) ? e.moe_cache_gib : v.moe_cache_gib;
+                s.moe_vram_free_mib = (e.moe_vram_free_mib > 0) ? e.moe_vram_free_mib : v.moe_vram_free_mib;
             } else {
                 LlmLogState& sref = log_states[log_path];
                 update_llm_log(sref, log_path);
@@ -1272,6 +1552,7 @@ void Collector::collect_llm() {
             have_state = true;
         }
         if (have_state) {
+            llm.moe = build_moe_line(s);   // v2.2: куда легли эксперты (Strata)
             llm.ctx_used = s.ctx_used;                     // §6.8c: держим всё время жизни
             llm.last_task = s.last_task;   // v2.1: для Strata — счётчик завершённых запросов
             llm.last_truncated = s.last_truncated;
@@ -1300,6 +1581,14 @@ void Collector::collect_llm() {
 
         if (llm.ctx_limit > 0)
             llm.ctx_percent = 100.0 * (llm.ctx_used < llm.ctx_limit ? llm.ctx_used : llm.ctx_limit) / llm.ctx_limit;
+
+        // v2.2: RAM модели (RSS/VmSwap) — видно, когда вес ломится в память/своп
+        {
+            long mpid = pid;
+            if (is_docker_llm) { long c = member_with_max_rss(pid); if (c > 0) mpid = c; }
+            double r = -1, s = -1;
+            if (read_status_vm(mpid, r, s)) { llm.rss_gb = r; llm.swap_gb = s; }
+        }
 
         llms.push_back(llm);
     }

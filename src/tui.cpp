@@ -242,6 +242,15 @@ std::string trunc_disp(const std::string& s, int cols) {
     return v.empty() ? std::string() : v[0].t;
 }
 
+// v2.2c: компактные единицы для io-строк (без выравнивающего отступа),
+// чтобы в узкой remote-панели влезало «io sda ↓ 32.4 KB/s».
+static std::string io_rate(double mbps) {
+    char b[24];
+    if (mbps < 0.1) snprintf(b, sizeof(b), "%.1f KB/s", mbps * 1024.0);
+    else            snprintf(b, sizeof(b), "%.1f MB/s", mbps);
+    return b;
+}
+
 // v2.0: заголовок секции — ОБРЕЗКА длинного текста (перенос строки убран:
 // именно он ломал рамки на двухпанельном экране; директива Шефа 21.10.2026)
 void box_top(std::vector<std::vector<Seg>>& f, const std::string& title) {
@@ -264,7 +273,36 @@ void box_bottom(std::vector<std::vector<Seg>>& f) {
     f.push_back({{"└", C_SEC}, {repeat("─", std::max(1, W - 2)), C_SEC}, {"┘", C_SEC}});
 }
 
-void box_row(std::vector<std::vector<Seg>>& f, const std::vector<Seg>& content) {
+// v2.2c: MOE-строка длиннее панели — переносим по разделителям «·», а не режем:
+// иначе в узкой remote-панели теряются «cache …» и «VRAM free …».
+static void box_row(std::vector<std::vector<Seg>>& f, const std::vector<Seg>& content);
+
+void moe_rows(std::vector<std::vector<Seg>>& f, const std::string& moe) {
+    int maxw = W - 3;
+    if (maxw < 24) maxw = 24;
+    std::vector<std::string> parts;
+    size_t pos = 0;
+    while (pos < moe.size()) {
+        size_t sep = moe.find("\u00b7", pos);          // «·» = 2 байта в UTF-8
+        std::string t = (sep == std::string::npos) ? moe.substr(pos) : moe.substr(pos, sep - pos);
+        size_t a = t.find_first_not_of(" \t"), b = t.find_last_not_of(" \t");
+        if (a != std::string::npos) parts.push_back(t.substr(a, b - a + 1));
+        if (sep == std::string::npos) break;
+        pos = sep + 2;
+    }
+    std::vector<std::string> lines;
+    std::string cur = "MOE ";
+    for (auto& p : parts) {
+        std::string cand = (cur.size() > 4) ? cur + "  ·  " + p : cur + p;
+        if (disp_width(cand) > maxw && cur.size() > 4) { lines.push_back(cur); cur = "     " + p; }
+        else cur = cand;
+    }
+    if (cur.size() > 4) lines.push_back(cur);
+    if (lines.empty()) lines.push_back("MOE " + moe);
+    for (auto& s : lines) box_row(f, {{s, C_DIM}});
+}
+
+static void box_row(std::vector<std::vector<Seg>>& f, const std::vector<Seg>& content) {
     std::vector<Seg> line;
     line.push_back({"│ ", C_SEC});
     for (auto& s : fit_width(content, W - 3)) line.push_back(s);
@@ -385,7 +423,8 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
     for (size_t i = 0; i < c.gpus.size(); i++) {
         const auto& g = c.gpus[i];
         box_sep(f);
-        box_top(f, "GPU " + std::to_string(g.index) + " — " + g.name);
+        box_top(f, "GPU " + std::to_string(g.index) + " — " + g.name +
+                        (g.pcie.empty() ? "" : ("  \u00b7  " + g.pcie)));   // v2.2: как карта подключена
         double vram_pct = (g.vram_total_gb > 0) ? 100.0 * g.vram_used_gb / g.vram_total_gb : -1.0;
         std::vector<Seg> desc;
         if (g.clock_mhz >= 0) desc.push_back({maybe(g.clock_mhz, " MHz"), C_DIM});
@@ -405,7 +444,9 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
     // LLM — сразу за GPU; главная модель первой (сортировка в collect_llm: ctx DESC)
     for (const auto& l : c.llms) {
         box_sep(f);
-        box_top(f, "LLM : " + std::to_string(l.port) + " — " + l.model_name);
+        // v2.2 (Шеф 02.11): Strata подписывается своим именем, llama остаётся LLM
+        box_top(f, (l.engine == "strata" ? "Strata : " : "LLM : ") +
+                   std::to_string(l.port) + " \u2014 " + l.model_name);
         {
             std::vector<Seg> desc;
             if (l.ctx_limit > 0)
@@ -451,6 +492,18 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
                      act ? 0 : (l.last_truncated >= 0 ? l.last_truncated : 0));
             box_row(f, {{tb, act ? C_ACT : C_DIM}});
         }
+        // v2.2: MOE-размещение (Strata) — куда легли эксперты и сколько VRAM осталось
+        // v2.2c: длинная строка переносится по «·», а не обрезается
+        if (!l.moe.empty())
+            moe_rows(f, l.moe);
+        // v2.2: RAM/своп процесса модели — видно давление на память.
+        // Для чужих/контейнерных процессов без прав может быть недоступно — тогда строки нет.
+        if (l.rss_gb >= 0) {
+            char mb[64];
+            snprintf(mb, sizeof(mb), "mem  RAM %5.1f Gb  swap %4.1f Gb", l.rss_gb,
+                     l.swap_gb >= 0 ? l.swap_gb : 0.0);
+            box_row(f, {{mb, (l.swap_gb > 0.5) ? C_ACT : C_DIM}});
+        }
     }
 
     // Sensors — hwmon-датчики кроме CPU/GPU (NVMe, сетевые PHY/MAC, ...)
@@ -493,15 +546,40 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             desc.push_back({sz, C_TXT});
             if (d.by_partitions) {
                 std::vector<Seg> line;
-                line.push_back({"│ ", C_SEC});
+                line.push_back({"\u2502 ", C_SEC});
                 for (auto& s : fit_width(desc, W - 11)) line.push_back(s);
                 int used = 0;
                 for (auto& s : line) used += disp_width(s.t);
                 if (used <= W - 8) line.push_back({std::string(W - used - 8, ' ') + "unknown", C_DIM});
-                line.push_back({"│", C_SEC});
+                line.push_back({"\u2502", C_SEC});
                 f.push_back(fit_width(line, W));
             } else {
                 bar_row(f, desc, d.usage_percent, "%");
+            }
+            // v2.2: строка активности появляется ТОЛЬКО когда диск реально дёргают —
+            // это детектор «модель лезет на NVMe» (бар = % времени, занятый IO)
+            if (d.read_mbs >= 0 || d.write_mbs >= 0 || d.busy_percent > 2.0) {
+                double r = d.read_mbs > 0 ? d.read_mbs : 0.0;
+                double w = d.write_mbs > 0 ? d.write_mbs : 0.0;
+                if (r + w > 0.05 || d.busy_percent > 2.0) {
+                    // v2.2c: компактный формат; в узкой панели показываем ТОТ поток,
+                    // который и вызвал активность (а не «↓ 0.0» при активной записи)
+                    std::string head = "io " + std::string(d.name);
+                    std::string rs = io_rate(r), ws = io_rate(w);
+                    int desc_w = W - 11 - bar_len(W) - 1;
+                    if (desc_w < 8) desc_w = 8;
+                    bool both = (disp_width(head + "  \u2193 " + rs + "  \u2191 " + ws) <= desc_w);
+                    bool show_r = both ? true : (r >= w);
+                    std::vector<Seg> io;
+                    io.push_back({head + " ", C_DIM});
+                    io.push_back({show_r ? "\u2193 " : "\u2191 ", C_SEC});
+                    io.push_back({show_r ? rs : ws, C_TXT});
+                    if (both) {
+                        io.push_back({"  \u2191 ", C_SEC});
+                        io.push_back({ws, C_TXT});
+                    }
+                    bar_row(f, io, d.busy_percent, "%");
+                }
             }
         }
     }
