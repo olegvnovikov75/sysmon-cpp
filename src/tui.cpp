@@ -208,10 +208,10 @@ std::string now_str() {
 }
 
 // v2.0: кредит — внизу, в футере (в шапке больше не рисуется)
-// v2.2e (Шеф 02.11): подписываем людей: «designed: Chief, Gaechka, Chip.»,
-// если не влезает — краткая форма «des.: Chief, Gaechka, Chip.»
-static const std::string CREDIT = "designed: Chief, Gaechka, Chip.";
-static const std::string CREDIT_SHORT = "des.: Chief, Gaechka, Chip.";
+// v2.2g (Шеф 02.11 14:53): подпись — ОТДЕЛЬНОЙ строкой под подсказкой клавиш,
+// в одну строку с подсказкой она не читалась.
+static const std::string CREDIT = " Designed: Chief (man), Gaechka, Chip (Openclaw)";
+static const std::string CREDIT_SHORT = " Des.: Chief (man), Gaechka, Chip (Openclaw)";
 
 // Привести сегменты ровно к target дисплейным колонкам (дополнить пробелами / обрезать)
 std::vector<Seg> fit_width(std::vector<Seg> segs, int target) {
@@ -823,25 +823,17 @@ std::string footer_extra(const TuiState& st) {
     return std::string("   m — remote: ") + mode_name(st.remote_mode);
 }
 
-// футер: клавиши слева, кредит справа (внизу экрана); программа узнаётся
-// по имени окна терминала — в шапке имени быть не должно
-void draw_footer(const TuiState& st, int full) {
+// футер: ПРЕЖДЕ подсказка клавиш, ПОД НЕЙ отдельной строкой подпись авторов.
+// lines = 2 (обычно) или 1 (очень низкий терминал — подпись жертвуется).
+void draw_footer(const TuiState& st, int full, int lines) {
     if (LINES < 1) return;
     std::string keys = " q — выход   r — пауза/продолжить" + footer_extra(st);
-    const int kw = disp_width(keys);
-    int lim = std::min(full, COLS - 1);
-    std::vector<Seg> row;
-    row.push_back({keys, C_DIM});
-    // полная подпись → краткая → если и краткая не влезает, подпись не рисуем (клавиши важнее)
+    int lim = std::min(full, COLS);
+    draw_line(LINES - lines, fit_width({{keys, C_DIM}}, lim), lim);
+    if (lines < 2) return;
     for (const std::string& cr : { CREDIT, CREDIT_SHORT }) {
-        if (kw + 2 + disp_width(cr) <= lim) {
-            row.push_back({std::string(lim - kw - disp_width(cr), ' '), C_TXT});
-            row.push_back({cr, C_DIM});
-            draw_line(LINES - 1, row, lim);
-            return;
-        }
+        if (disp_width(cr) <= lim) { draw_line(LINES - 1, {{cr, C_DIM}}, lim); return; }
     }
-    draw_line(LINES - 1, fit_width(row, lim), lim);
 }
 
 // локальная строка статуса: «дд.мм.гггг чч:мм:сс  up ...»; при паузе — заморожена
@@ -923,10 +915,12 @@ bool tui_frame(const Collector& local, const Collector* remote, TuiState& st,
             }
         }
         erase();
-        int ymax = LINES - 1;   // последняя строка — под футер
+        // футер — ДВЕ строки (клавиши + подпись); в очень низком терминале остаётся одна
+        int flines = (LINES >= 5) ? 2 : 1;
+        int ymax = LINES - flines;
         for (int y = 0; y < (int)frame.size() && y < ymax; y++)
             draw_line(y, frame[y], full);
-        draw_footer(st, full);
+        draw_footer(st, full, flines);
         refresh();
         curs_set(0);   // курсор может «проявляться» на некоторых терминалах — прячем каждый кадр
     };
