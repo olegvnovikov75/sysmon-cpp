@@ -379,15 +379,19 @@ static void moe_compact(std::vector<std::vector<Seg>>& f, const LLMStats& l) {
         char b[32]; snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
         p2 += (p2.empty() ? "" : "   ") + std::string(b);
     }
-    if (disp_width(p2) > W - 5 && !p2.empty()) {        // узкая панель — делим по пробелам
+    // v2.2h (Шеф 02.11 14:59): порядок — сначала «CPU-prefill … cache …» строкой,
+    // затем «GPU MOE exp.»; раньше при переносе узкой панели части p2 перемешивались
+    // со строкой experts (получалось CPU-prefill / MOE exp / cache).
+    if (!p2.empty()) {
         size_t sp = p2.find("   ");
-        if (sp != std::string::npos) {
+        if (disp_width(p2) <= W - 3 || sp == std::string::npos) {
+            box_row(f, {{p2, C_DIM}});
+        } else {
             box_row(f, {{p2.substr(0, sp), C_DIM}});
-            p2 = p2.substr(sp + 3);
+            box_row(f, {{p2.substr(sp + 3), C_DIM}});
         }
     }
     if (!p1.empty()) box_row(f, {{p1, C_DIM}});
-    if (!p2.empty()) box_row(f, {{p2, C_DIM}});
 }
 
 // v2.2d (Шеф 02.11): RAM/SWAP процесса модели — ДВА бара в одну строку вместо «mem RAM ... swap ...».
