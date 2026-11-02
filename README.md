@@ -42,9 +42,9 @@ LLM gen/prefill — из свежих строк лога движка (сгла
 
 ## Готовые бинарники
 
-✅ `sysmon-ubuntu` в корне репозитория — **актуальной версии v2.2h** (собран на Ubuntu 22.04,
-glibc 2.35, динамический: нужны только `libncursesw6`, `libtinfo6`, `libcurl4`). Берётся прямо
-из дерева: `curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/raw/master/sysmon-ubuntu`.
+✅ `sysmon-ubuntu` в корне репозитория — **актуальной версии v2.2h** (тот же бинарник, что работает
+на мониторе; собран на Ubuntu 24.04, требует glibc ≥ 2.38, динамический: нужны только
+`libncursesw6`, `libtinfo6`, `libcurl4`). Берётся прямо из дерева: `curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/raw/master/sysmon-ubuntu`.
 
 ⚠ В **релизах** GitHub бинарники выложены только для **v2.0** (в том числе Windows). Текущую
 версию для Windows пока надо собрать самому (mingw, см. историю коммитов v2.0/v2.1) — статический
@@ -66,7 +66,7 @@ glibc 2.35, динамический: нужны только `libncursesw6`, `l
 # зависимости (обычно уже стоят): libncursesw6, libtinfo6, libcurl4
 sudo apt install libncursesw6 libtinfo6 libcurl4
 
-curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-ubuntu
+curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/raw/master/sysmon-ubuntu
 chmod +x ~/sysmon
 sudo mv ~/sysmon /usr/local/bin/sysmon   # или оставить в ~
 sysmon
@@ -135,8 +135,10 @@ NET:  rx      7 KB/s  tx      1 KB/s   [wlp195s0,enp196s0]
        task 1574099 n_t 135k   trnc 0
        RAM 11.8 Gb (9% of RAM)  SWAP  2.4 Gb (7% of swap)
 ```
-У Strata в тексте заголовок `Strata  port  1234 …` и строка `MOE experts 24576/24576 on GPU · CPU-prefill off ·
-expert cache 46.8 Gb · VRAM free 1.3 Gb` (в TUI — компактный двухстрочный вариант).
+У Strata в тексте заголовок `Strata  port  1234 …`, а MOE — двумя строками (как в TUI, v2.2h):
+`CPU-prefill = off   cache = 46.8 Gb` и `GPU MOE exp. 24576/24576`; строка `RAM/SWAP` процесса модели
+для Strata не печатается (расход виден в RAM/GPU). В TUI порядок тот же: сначала prefill/cache,
+experts — последним.
 
 ## Как устроено
 
