@@ -2,7 +2,7 @@
 
 Компактный мониторинг ПК в C++: TUI в стиле htop (без лишнего) + метрики LLM-движков
 **llama.cpp и Strata**. Одна программа, ноль зависимостей в рантайме (ncurses + curl), сборка одной командой.
-Текущая версия: **v2.2h** (список изменений — в конце).
+Текущая версия: **v2.2i** (список изменений — в конце).
 ## Снимок (v2.2h: live, локальная машина `.213` + remote `-ip .42`, две панели)
 
 ![SYSMON v2.2h — 256 цветов](docs/sysmon_v2.2h_256.png)
@@ -32,21 +32,21 @@ LLM gen/prefill — из свежих строк лога движка (сгла
 
 ## Готовые бинарники
 
-✅ `sysmon-ubuntu` в корне репозитория — **актуальной версии v2.2h** (тот же бинарник, что работает
+✅ `sysmon-ubuntu` в корне репозитория — **актуальной версии v2.2i** (тот же бинарник, что работает
 на мониторе; собран на Ubuntu 24.04, требует glibc ≥ 2.38, динамический: нужны только
 `libncursesw6`, `libtinfo6`, `libcurl4`). Берётся прямо из дерева: `curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/raw/master/sysmon-ubuntu`.
 
-✅ В релизе **[v2.2h](https://github.com/olegvnovikov75/sysmon-cpp/releases/tag/v2.2h)** — все три
+✅ В релизе **[v2.2i](https://github.com/olegvnovikov75/sysmon-cpp/releases/tag/v2.2i)** — все три
 ассета: Ubuntu-бинарник, Windows `.exe` (собран mingw: ncurses 6.4 term-driver + curl 8.10.1 Schchannel,
 проверен в wine) и исходники. Релизы v2.0/v1.5.0 остаются как исторические.
 
 | Платформа | Файл | Ссылка |
 |---|---|---|
-| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2h/sysmon-ubuntu) |
-| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2h/sysmon-windows-console.exe) |
-| Исходники | `sysmon-cpp-v2.2h-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2h/sysmon-cpp-v2.2h-src.tar.gz) |
+| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2i/sysmon-ubuntu) |
+| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2i/sysmon-windows-console.exe) |
+| Исходники | `sysmon-cpp-v2.2i-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2i/sysmon-cpp-v2.2i-src.tar.gz) |
 
-Примечание: Windows-бинарник v2.2h собран статическим (mingw) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
+Примечание: Windows-бинарник v2.2i собран статическим (mingw) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
 
 Все релизы: [github.com/olegvnovikov75/sysmon-cpp/releases](https://github.com/olegvnovikov75/sysmon-cpp/releases)
 
@@ -193,6 +193,11 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 - **Сеть:** показываются только интерфейсы в `operstate=up`, без lo/veth/br-/docker/tailscale.
 
 ## Релизы
+- **v2.2i** (03.11.2026, замечание Шефа) — починен «ratchet» ctx у Strata: живая строка
+  `reading the prompt: X of Y` теперь пишет `ctx_used` напрямую (раньше — только «вверх»), а слияние
+  engine/server-логов идёт по свежести записи (`ts_ctx`), а не `max()`. Исторический пик больше не
+  прибивает панель: ctx уменьшается, когда новый промпт меньше. Проверено на живом .42: sysmon 81 781/62.4%
+  = сырой лог Strata. cache reuse / spec accept при этом исправны (§6.8c: держат последнее значение в паузе).
 - **v2.2h** (02.11.2026, просьба Шефа 14:59) — порядок MOE-строк: сначала `CPU-prefill = off   cache = 46.8 Gb`,
   затем `GPU MOE exp. NNNN/NNNN`. Раньше в узкой панели перенос резал p2 пополам и вставлял строку
   experts между частями (выходило CPU-prefill / MOE exp / cache — путаница). Теперь перенос, если не

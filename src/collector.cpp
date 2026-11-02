@@ -134,6 +134,7 @@ struct LlmLogState {
     double prefill2_tps = -1.0;
     std::deque<double> prefill_samples;         // последние 30 замеров 'prompt processing'
     double ts_gen = -1e18, ts_prefill = -1e18;  // время последнего вида маркеров (steady, с)
+    double ts_ctx = -1e18;              // v2.2i: время последней записи ctx_used (мерж двух логов Strata)
     bool seen = false;                          // v1.11: файл уже встречался
     unsigned long long ino = 0, dev = 0;        // v1.11: идентификатор файла (смена лога)
     // v2.2: Strata MOE — куда легли эксперты (печатаются ОДИН РАЗ при старте,
@@ -371,7 +372,7 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
     p = l.find("stop processing: n_tokens = ");
     if (p != std::string::npos) {
         int v = atoi(l.c_str() + p + 28);
-        if (v > 0) s.ctx_used = v;   // §6.8c: CTX никогда не 0
+        if (v > 0) { s.ctx_used = v; s.ts_ctx = now; }   // §6.8c: CTX никогда не 0
         size_t t1 = l.rfind("task ", p);
         if (t1 != std::string::npos && p - t1 < 40) {
             int tv = atoi(l.c_str() + t1 + 5);
@@ -473,7 +474,7 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
             size_t par2   = (gi == std::string::npos) ? std::string::npos : l.find('(', gi);
             double gtok   = (par2 == std::string::npos) ? -1.0 : parse_num_at(l, par2);
             if (n > 0) {
-                s.ctx_used = (int)n;
+                s.ctx_used = (int)n;  s.ts_ctx = now;
                 if (reused >= 0) s.cache_reuse_percent = 100.0 * reused / n;
                 s.last_task++;                     // у Strata нет №task — считаем завершённые запросы
                 s.live_prompt = (int)n;
@@ -501,7 +502,9 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
         size_t ofp = l.find(" of ", p);
         double tot = (ofp == std::string::npos) ? -1.0 : parse_num_at(l, ofp + 4);
         if (cur > 0) s.live_prompt = (int)cur;
-        if (tot > s.ctx_used) s.ctx_used = (int)tot;   // ctx живой, ещё до итоговой строки движка
+        // v2.2i (Шеф 02.11): «of Y» — размер prompt ТЕКУЩЕГО запроса; присваиваем, а не
+        // максимизируем: новый (меньший) запрос должен уменьшать ctx, а не упираться в исторический пик.
+        if (tot > 0) { s.ctx_used = (int)tot; s.ts_ctx = now; }   // ctx живой, ещё до итоговой строки движка
         s.ts_prefill = now;
     }
     // 'thinking: 90 of budget 24576 (max 32768) tokens, 94.7 tok/s, 11 s'
@@ -1520,7 +1523,10 @@ void Collector::collect_llm() {
                 update_llm_log(ds.eng, strata_engine_log);
                 if (!strata_server_log.empty()) update_llm_log(ds.srv, strata_server_log);
                 LlmLogState& e = ds.eng; LlmLogState& v = ds.srv;
-                s.ctx_used = std::max(e.ctx_used, v.ctx_used);
+                // v2.2i (Шеф 02.11): ctx — по свежести источника, а НЕ max(). Старый max()
+                // вечно держал завышенное значение server-лога (бывший пик «of Y»),
+                // даже когда реальный prompt уже сжался в разы.
+                s.ctx_used = (e.ts_ctx >= v.ts_ctx) ? e.ctx_used : v.ctx_used;
                 s.last_task = e.last_task;               // № запросов считает engine-лог
                 s.last_truncated = e.last_truncated;
                 s.spec_accept_percent = e.spec_accept_percent;
