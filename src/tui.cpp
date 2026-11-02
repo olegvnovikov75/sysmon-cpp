@@ -208,7 +208,10 @@ std::string now_str() {
 }
 
 // v2.0: кредит — внизу, в футере (в шапке больше не рисуется)
-static const std::string CREDIT = "Designed by Chip and Gayechka (openclaw)";
+// v2.2e (Шеф 02.11): подписываем людей: «designed: Chief, Gaechka, Chip.»,
+// если не влезает — краткая форма «des.: Chief, Gaechka, Chip.»
+static const std::string CREDIT = "designed: Chief, Gaechka, Chip.";
+static const std::string CREDIT_SHORT = "des.: Chief, Gaechka, Chip.";
 
 // Привести сегменты ровно к target дисплейным колонкам (дополнить пробелами / обрезать)
 std::vector<Seg> fit_width(std::vector<Seg> segs, int target) {
@@ -825,17 +828,20 @@ std::string footer_extra(const TuiState& st) {
 void draw_footer(const TuiState& st, int full) {
     if (LINES < 1) return;
     std::string keys = " q — выход   r — пауза/продолжить" + footer_extra(st);
+    const int kw = disp_width(keys);
+    int lim = std::min(full, COLS - 1);
     std::vector<Seg> row;
     row.push_back({keys, C_DIM});
-    int lim = std::min(full, COLS - 1);
-    int need = disp_width(keys) + 2 + (int)CREDIT.size();
-    if (need <= lim) {
-        row.push_back({std::string(lim - disp_width(keys) - (int)CREDIT.size(), ' '), C_TXT});
-        row.push_back({CREDIT, C_DIM});
-    } else {
-        row = fit_width(row, lim);
+    // полная подпись → краткая → если и краткая не влезает, подпись не рисуем (клавиши важнее)
+    for (const std::string& cr : { CREDIT, CREDIT_SHORT }) {
+        if (kw + 2 + disp_width(cr) <= lim) {
+            row.push_back({std::string(lim - kw - disp_width(cr), ' '), C_TXT});
+            row.push_back({cr, C_DIM});
+            draw_line(LINES - 1, row, lim);
+            return;
+        }
     }
-    draw_line(LINES - 1, row, lim);
+    draw_line(LINES - 1, fit_width(row, lim), lim);
 }
 
 // локальная строка статуса: «дд.мм.гггг чч:мм:сс  up ...»; при паузе — заморожена
