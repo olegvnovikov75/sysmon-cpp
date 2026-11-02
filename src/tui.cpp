@@ -13,10 +13,12 @@
 #define COLOR_GRAY COLOR_BLACK
 #endif
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <algorithm>
 #include <functional>
@@ -270,6 +272,41 @@ static double io_bar_pct(double mbps, const DiskStats& d) {
     return f * 100.0;
 }
 
+// v2.2e (Шеф 02.11): «былой максимум» на баре io — вертикальная полоска там, где был
+// пик активности. Максимум спадает плавно (за ~90 с уменьшается вдвое), поэтому в паузе
+// видно «как буянил» диск: [░░░░│░░░░░]. Состояние — на панель (tag = IP машины) + диск.
+struct IoPeak { double pct = 0.0; std::chrono::steady_clock::time_point ts{}; };
+static std::map<std::string, IoPeak> g_io_peak;
+
+static double io_peak_pct(const std::string& tag, const std::string& disk, double cur) {
+    IoPeak& p = g_io_peak[tag + "|" + disk];
+    auto now = std::chrono::steady_clock::now();
+    if (p.ts.time_since_epoch().count() == 0) { p.ts = now; p.pct = cur; return p.pct; }
+    double dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - p.ts).count() / 1000.0;
+    p.ts = now;
+    if (dt > 0) p.pct *= std::exp(-dt / 90.0);       // полураспад ~90 с
+    if (cur > p.pct) p.pct = cur;
+    if (p.pct < 1.5) p.pct = 0.0;                    // совсем тихо — полоску не рисуем
+    return p.pct;
+}
+
+// бар с меткой максимума: залитая часть = текущая активность, «│» = былой пик
+static void add_bar_peak(std::vector<Seg>& row, double pct, double peak_pct, int width) {
+    int filled = (pct < 0) ? 0 : (int)(pct / 100.0 * width + 0.5);
+    if (filled > width) filled = width;
+    int mark = (peak_pct > 0) ? (int)(peak_pct / 100.0 * width + 0.5) - 1 : -1;
+    if (mark >= width) mark = width - 1;
+    if (mark < filled || mark < 1) mark = -1;        // пик = текущий уровень или слишком мал — метки нет
+    row.push_back({"[", C_TXT});
+    for (int i = 0; i < width; i++) {
+        double r = width > 1 ? (double)i / (width - 1) : 1.0;
+        if (i < filled)      row.push_back({"\u2588", grad_attr(r, false)});
+        else if (i == mark)  row.push_back({"\u2502", C_SEC});
+        else                 row.push_back({"\u2591", C_TRACK});
+    }
+    row.push_back({"]", C_TXT});
+}
+
 // v2.0: заголовок секции — ОБРЕЗКА длинного текста (перенос строки убран:
 // именно он ломал рамки на двухпанельном экране; директива Шефа 21.10.2026)
 void box_top(std::vector<std::vector<Seg>>& f, const std::string& title) {
@@ -398,7 +435,7 @@ static int bar_len(int w) {
 // v2.2d (Шеф 02.11): постоянная io-строка диска (рядом с bar_row — те же колонки,
 // поэтому бары стоят в одной линии со всеми остальными барами панели).
 // Пауза: «io sda idle» + пустой бар. Работа: ↓/↑ и бар от лог-шкалы скорости.
-void io_row(std::vector<std::vector<Seg>>& f, const DiskStats& d) {
+void io_row(std::vector<std::vector<Seg>>& f, const DiskStats& d, const std::string& tag) {
     double r = d.read_mbs > 0 ? d.read_mbs : 0.0;
     double w = d.write_mbs > 0 ? d.write_mbs : 0.0;
     double tot = r + w;
@@ -438,7 +475,9 @@ void io_row(std::vector<std::vector<Seg>>& f, const DiskStats& d) {
     if (vw < 5) vs = vs + std::string(5 - vw, ' ');
     line.push_back({vs, va});
     line.push_back({" ", C_TXT});
-    add_bar(line, act ? io_bar_pct(tot, d) : -1.0, bl);
+    double cur_pct = act ? io_bar_pct(tot, d) : -1.0;
+    double peak = io_peak_pct(tag, d.name, cur_pct > 0 ? cur_pct : 0.0);
+    add_bar_peak(line, cur_pct, peak, bl);
     line.push_back({"\u2502", C_SEC});
     f.push_back(fit_width(line, W));
 }
@@ -676,7 +715,7 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             // v2.2d (Шеф 02.11): строка io под каждым диском ПОСТОЯННА (раньше появлялась
             // только при активности и «прыгала» по высоте панели) — меняется только содержимое:
             // в паузе «idle», в работе — ↓/↑ и бар активности (лог-шкала от потолка устройства).
-            io_row(f, d);
+            io_row(f, d, o.title);
         }
     }
 
