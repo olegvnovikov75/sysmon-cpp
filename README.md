@@ -17,10 +17,9 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 | **CPU** | модель (в заголовке), загрузка % (бар), температура (бар), load 1/5/15, ядра | `/proc/cpuinfo`, `/proc/stat`, `/proc/loadavg`, thermal_zone / hwmon (k10temp, coretemp) / `sensors` |
 | **RAM** | занято/всего GiB, %, swap | `/proc/meminfo` |
 | **GPU** (NVIDIA + AMD, все карты) | util % (бар), VRAM GiB, температура (бар), clock MHz, power W, **PCIe-линия** (`PCIe4 x16`, справочная статика) | `nvidia-smi` (CSV), `/sys/class/drm/*/device` + hwmon (amdgpu), `/sys/bus/pci/devices/*/current_link_speed|width` + `max_link_*` |
-| **LLM** (llama-server **и** Strata) | заголовок `LLM : порт — модель` / `Strata : порт — модель`, ctx % (бар, занято/лимит tok), cache reuse % (бар), spec accept % (бар), gen tok/s, prefill tok/s, задача (№task / n_t / trnc), **mem RAM/swap процесса модели**, **MOE-размещение** (Strata) — **всё из логов движка** | `/proc/*/cmdline` (в т.ч. контейнерный `llama-server` через cgroup), Strata — `~/.local/state/strata/launch/*.json` + engine.log/server.log; RSS/Swap — `VmRSS`/`VmSwap` из `/proc/PID/status` |
-| **Disks** | целые диски: тип (HDD/SSD/NVMe), размер GiB, модель, **занятость ФС** (used/total GiB, %, бар), **io-строка** (↓ чтение / ↑ запись MB/s + busy %) — появляется только когда диск реально дёргают | `/sys/block/*` (size, queue/rotational, device/model), `/sys/class/nvme/*/model`, `/proc/mounts` + `statvfs` (занятость, вкл. LVM), `/proc/diskstats` (дельты секторов и «ms doing I/O») |
+| **LLM** (llama-server **и** Strata) | заголовок `LLM : порт — модель` / `Strata : порт — модель`, ctx % (бар, занято/лимит tok), cache reuse % (бар), spec accept % (бар), gen tok/s, prefill tok/s, задача (№task / n_t / trnc), **RAM/SWAP процесса модели двумя барами в одну строку** (для llama.cpp/docker; для Strata не рисуется), **MOE-размещение** (Strata): `GPU MOE exp. 24576/24576` + `CPU-prefill = off   cache = 46.8 Gb` — **всё из логов движка** | `/proc/*/cmdline` (в т.ч. контейнерный `llama-server` через cgroup), Strata — `~/.local/state/strata/launch/*.json` + engine.log/server.log; RSS/Swap — `VmRSS`/`VmSwap` из `/proc/PID/status` |
+| **Disks** | целые диски: тип (HDD/SSD/NVMe), размер GiB, модель, **занятость ФС** (used/total GiB, %, бар), **io-строка под диском ВСЕГДА** (в паузе `idle`; в работе ↓ чтение / ↑ запись MB/s + busy % ядра и адаптивный бар активности) | `/sys/block/*` (size, queue/rotational, device/model), `/sys/class/nvme/*/model`, `/proc/mounts` + `statvfs` (занятость, вкл. LVM), `/proc/diskstats` (дельты секторов и «ms doing I/O») |
 | **Network** | rx/tx MB/s по каждому активному интерфейсу | `/sys/class/net/*/statistics` (дельты) |
-| **Disks** | целые диски: тип (HDD/SSD/NVMe), размер GiB, модель, **занятость ФС** (used/total GiB, %, бар) | `/sys/block/*` (size, queue/rotational, device/model), `/sys/class/nvme/*/model`, `/proc/mounts` + `statvfs` (занятость, вкл. LVM) |
 | **Sensors** | температуры hwmon-датчиков с барами (NVMe, сетевые PHY/MAC и др.) | `/sys/class/hwmon/*` |
 
 Оформление: весь текст белый, цвет — только у процентов и баров.
@@ -170,6 +169,21 @@ Makefile              g++ -std=c++17 -O2, -lncursesw -lcurl (заголовки 
 - **Сеть:** показываются только интерфейсы в `operstate=up`, без lo/veth/br-/docker/tailscale.
 
 ## Релизы
+- **v2.2d** (02.11.2026, директивы Шефа) — компактнее и без «мигания»:
+  - **MOE-блок Strata: 4 строки → 2:** `GPU MOE exp. 24576/24576` (было `MOE experts … on GPU`) и
+    `CPU-prefill = off   cache = 46.8 Gb` в одну строку. `VRAM free …` из TUI убран — остаток VRAM виден
+    в GPU-секции выше (в JSON `moe_vram_free_gb` осталось).
+  - **`mem RAM … swap …` → два бара в одну строку:** `RAM 11.3G [█░░░░░░░░] SWAP 2.0G [█░░░░░░░░]`
+    (шкала от системного тотала: 11.3 GiB из 121.5 GiB ≈ 9%). Это RAM/SWAP **самого процесса модели**
+    (`VmRSS`/`VmSwap`): веса + контекст, которые движок держит в ОЗУ — не вся система.
+    Для Strata строка не рисуется (расход и так видно в секциях RAM/GPU).
+  - **io-строка диска не исчезает:** стоит постоянно под строкой диска; в паузе `io sda idle` с пустым
+    баром, в работе — ↓/↑ и значения (панель не «прыгает» по высоте).
+  - **Бар io адаптирован:** вместо busy % ядра (на X99 у NVMe он не ходит → всегда 0) бар = доля от
+    реального потолка устройства в **лог-шкале** (NVMe 1200 / SATA SSD 550 / HDD 180 MB/s):
+    0.1 МБ/с ≈ пусто, 30 МБ/с ≈ треть, 570–700 МБ/с ≈ полный. Число слева от бара — busy % ядра или `—`.
+  - JSON: добавлены `llms[].moe_experts|moe_total|moe_place|moe_cpu_prefill|moe_cache_gb|moe_vram_free_gb`;
+    если удалённый сервер старой версии их не отдаёт — TUI откатывается на прежний перенос строки `moe`.
 - **v2.2** (02.11.2026) — диагностика Strata (MOE-движок) без потери совместимости с llama.cpp:
   заголовок `Strata : порт — модель`, порты/имя модели/пути логов из launch-JSON
   (`~/.local/state/strata/launch/*.json`), мёрж engine.log (итоги запроса, старт-конфиг MOE)

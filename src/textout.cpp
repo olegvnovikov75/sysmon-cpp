@@ -155,12 +155,18 @@ void render_text(const Collector& c) {
                 printf("  %s%-8s%s %-4s %6.1f Gb%s\n",
                        col.bold, d.name.c_str(), col.rst, d.type.c_str(), d.size_gb, md.c_str());
             // v2.2: активность диска — детектор «модель лезет на NVMe» (дельты /proc/diskstats)
+            // v2.2d (Шеф 02.11): строка постоянна (не исчезает в паузе); busy «—» если ядро его не считает
             {
                 double r = d.read_mbs > 0 ? d.read_mbs : 0.0;
                 double w = d.write_mbs > 0 ? d.write_mbs : 0.0;
-                if (r + w > 0.05 || d.busy_percent > 2.0)
-                    printf("          r %6.1f MB/s  w %6.1f MB/s   busy %3.0f%%\n", r, w,
-                           d.busy_percent > 0 ? d.busy_percent : 0.0);
+                if (r + w > 0.05 || d.busy_percent > 2.0) {
+                    char bs[16];
+                    if (d.busy_percent >= 0) snprintf(bs, sizeof(bs), "%3.0f%%", d.busy_percent);
+                    else snprintf(bs, sizeof(bs), "  \u2014");
+                    printf("          r %6.1f MB/s  w %6.1f MB/s   busy %s\n", r, w, bs);
+                } else {
+                    printf("          %sidle%s\n", col.dim, col.rst);
+                }
             }
         }
     }
@@ -202,11 +208,31 @@ void render_text(const Collector& c) {
                    fmt_tok(l.task_live ? l.task_n_live : l.ctx_used).c_str(),
                    l.task_live ? 0 : (l.last_truncated >= 0 ? l.last_truncated : 0));
             // v2.2: MOE-размещение (Strata) и RAM/своп процесса модели
-            if (!l.moe.empty())
-                printf("       %sMOE  %s%s\n", col.dim, l.moe.c_str(), col.rst);
-            if (l.rss_gb >= 0)
-                printf("       %smem  RAM %5.1f Gb  swap %4.1f Gb%s\n", col.dim,
-                       l.rss_gb, l.swap_gb >= 0 ? l.swap_gb : 0.0, col.rst);
+            // v2.2d: компактнее; VRAM free убран (виден в GPU-секции), mem-строка для Strata не нужна
+            if (!l.moe.empty() || l.moe_experts > 0) {
+                std::string p1, p2;
+                if (l.moe_experts > 0) {
+                    p1 = (l.moe_place == "host") ? "CPU MOE exp. " : "GPU MOE exp. ";
+                    p1 += std::to_string(l.moe_experts);
+                    if (l.moe_total > 0) p1 += "/" + std::to_string(l.moe_total);
+                }
+                if (l.moe_cpu_prefill >= 0) p2 = std::string("CPU-prefill = ") + (l.moe_cpu_prefill ? "on" : "off");
+                if (l.moe_cache_gib > 0) {
+                    char b[32]; snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
+                    p2 += (p2.empty() ? "" : "   ") + std::string(b);
+                }
+                if (p1.empty() && p2.empty()) { p1 = l.moe; p2.clear(); }   // старый удалённый JSON
+                if (!p1.empty()) printf("       %s%s%s\n", col.dim, p1.c_str(), col.rst);
+                if (!p2.empty()) printf("       %s%s%s\n", col.dim, p2.c_str(), col.rst);
+            }
+            if (l.rss_gb >= 0 && l.engine != "strata") {
+                double rt = c.ram.total_gb, st = c.ram.swap_total_gb;
+                double swp = l.swap_gb >= 0 ? l.swap_gb : 0.0;
+                printf("       RAM %4.1f Gb%s  SWAP %4.1f Gb%s\n", l.rss_gb,
+                       rt > 0 ? (" (" + std::to_string((int)(l.rss_gb / rt * 100)) + "% of RAM)").c_str() : "",
+                       swp,
+                       st > 0 ? (" (" + std::to_string((int)(swp / st * 100)) + "% of swap)").c_str() : "");
+            }
         }
     }
     hr();

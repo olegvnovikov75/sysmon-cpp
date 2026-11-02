@@ -113,6 +113,14 @@ struct LLMStats {
     double swap_gb = -1.0;
     // v2.1: MOE-размещение (Strata, из engine-лога при старте; пусто = нет данных)
     std::string moe;                    // готовая строка: "experts 24576/24576 on GPU · CPU-prefill off · VRAM free 1.3 Gb"
+    // v2.2d (Шеф 02.11): те же числа структурой — чтобы TUI рисовал компактно и не парсил строку.
+    // Старый удалённый сервер их не отдаёт → -1/пусто → TUI откатывается на moe_rows(l.moe).
+    int moe_experts = -1;               // резидентных экспертов
+    int moe_total = -1;                 // всего экспертов
+    std::string moe_place;              // "GPU" | "host"
+    int moe_cpu_prefill = -1;           // -1 неизвестно, 0 выключен, 1 включён
+    double moe_cache_gib = -1.0;        // expert cache
+    double moe_vram_free_gib = -1.0;    // остаток VRAM (в TUI больше не рисуется — видно в GPU-панели)
 };
 
 class Collector {

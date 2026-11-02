@@ -1553,6 +1553,13 @@ void Collector::collect_llm() {
         }
         if (have_state) {
             llm.moe = build_moe_line(s);   // v2.2: куда легли эксперты (Strata)
+            // v2.2d (Шеф 02.11): те же значения структурой — компактный рендер в TUI
+            if (s.moe_resident > 0) llm.moe_experts = s.moe_resident;
+            if (s.moe_total > 0)    llm.moe_total = s.moe_total;
+            llm.moe_place = s.moe_place;
+            llm.moe_cpu_prefill = s.moe_cpu_prefill;
+            if (s.moe_cache_gib > 0)     llm.moe_cache_gib = s.moe_cache_gib;
+            if (s.moe_vram_free_mib > 0) llm.moe_vram_free_gib = s.moe_vram_free_mib / 1024.0;
             llm.ctx_used = s.ctx_used;                     // §6.8c: держим всё время жизни
             llm.last_task = s.last_task;   // v2.1: для Strata — счётчик завершённых запросов
             llm.last_truncated = s.last_truncated;

@@ -149,7 +149,14 @@ std::string collector_to_json(const Collector& c) {
         j += "\"active\":\"" + jesc(l.active) + "\",";               // v2.0: "gen"|"prefill"|""
         j += "\"rss_gb\":" + jnum(l.rss_gb) + ",";                   // v2.2: RAM/своп процесса модели
         j += "\"swap_gb\":" + jnum(l.swap_gb) + ",";
-        j += "\"moe\":\"" + jesc(l.moe) + "\"}";                     // v2.2: куда легли эксперты (Strata)
+        j += "\"moe\":\"" + jesc(l.moe) + "\",";                     // v2.2: куда легли эксперты (Strata)
+        // v2.2d: структурированный MOE-блок (компактный TUI); старые читатели игнорируют
+        j += "\"moe_experts\":" + jnum(l.moe_experts) + ",";
+        j += "\"moe_total\":" + jnum(l.moe_total) + ",";
+        j += "\"moe_place\":\"" + jesc(l.moe_place) + "\",";
+        j += "\"moe_cpu_prefill\":" + jnum(l.moe_cpu_prefill) + ",";
+        j += "\"moe_cache_gb\":" + jnum(l.moe_cache_gib) + ",";
+        j += "\"moe_vram_free_gb\":" + jnum(l.moe_vram_free_gib) + "}";
     }
     j += "]}";
     return j;
@@ -412,6 +419,13 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.rss_gb = e.getnum("rss_gb", -1);                        // v2.2
             ls.swap_gb = e.getnum("swap_gb", -1);
             ls.moe = e.getstr("moe");
+            // v2.2d: структурированный MOE (нет у старых серверов → -1, TUI откатится на строку)
+            ls.moe_experts = (int)e.getnum("moe_experts", -1);
+            ls.moe_total = (int)e.getnum("moe_total", -1);
+            ls.moe_place = e.getstr("moe_place");
+            ls.moe_cpu_prefill = (int)e.getnum("moe_cpu_prefill", -1);
+            ls.moe_cache_gib = e.getnum("moe_cache_gb", -1);
+            ls.moe_vram_free_gib = e.getnum("moe_vram_free_gb", -1);
             out.llms.push_back(ls);
         }
 

@@ -251,6 +251,25 @@ static std::string io_rate(double mbps) {
     return b;
 }
 
+// v2.2d (Шеф 02.11): адаптивный бар активности диска. Раньше бар = busy% ядра, и он
+// почти всегда 0 (на X99 с ядром 6.8 счётчик «ms doing I/O» у NVMe вообще не ходит).
+// Теперь бар — доля от реального потолка скорости устройства, в ЛОГАРИФМИЧЕСКОЙ шкале
+// (диапазон скоростей три порядка: 0.1 МБ/с … 1 ГБ/с). Число слева от бара — по-прежнему
+// busy% ядра («—» если ядро его не считает).
+static double io_ceiling(const DiskStats& d) {
+    if (d.type == "NVMe") return 1200.0;   // PCIe3/4 x4 NVMe
+    if (d.type == "SSD")  return 550.0;    // SATA SSD
+    if (d.type == "HDD")  return 180.0;    // 7200 об/мин
+    return 600.0;
+}
+
+static double io_bar_pct(double mbps, const DiskStats& d) {
+    if (mbps <= 0.01) return 0.0;
+    double f = std::log10(1.0 + mbps) / std::log10(1.0 + io_ceiling(d));
+    if (f > 1.0) f = 1.0;
+    return f * 100.0;
+}
+
 // v2.0: заголовок секции — ОБРЕЗКА длинного текста (перенос строки убран:
 // именно он ломал рамки на двухпанельном экране; директива Шефа 21.10.2026)
 void box_top(std::vector<std::vector<Seg>>& f, const std::string& title) {
@@ -302,6 +321,62 @@ void moe_rows(std::vector<std::vector<Seg>>& f, const std::string& moe) {
     for (auto& s : lines) box_row(f, {{s, C_DIM}});
 }
 
+// v2.2d (Шеф 02.11): компактный MOE-блок. Было 4 строки (experts / CPU-prefill / cache /
+// VRAM free + mem) — стало две: «GPU MOE exp. 24576/24576» и «CPU-prefill = off   cache = 46.8 Gb».
+// VRAM free убран из TUI: остаток VRAM и так виден в GPU-панели выше (в JSON поле осталось).
+// Если структурированных полей нет (удалённый сервер старой версии) — прежний перенос по «·».
+static void moe_compact(std::vector<std::vector<Seg>>& f, const LLMStats& l) {
+    if (l.moe_experts < 0 && l.moe_cpu_prefill < 0 && l.moe_cache_gib < 0) { moe_rows(f, l.moe); return; }
+    std::string p1;
+    if (l.moe_experts > 0) {
+        p1 = (l.moe_place == "host") ? "CPU MOE exp. " : "GPU MOE exp. ";
+        p1 += std::to_string(l.moe_experts);
+        if (l.moe_total > 0) p1 += "/" + std::to_string(l.moe_total);
+    }
+    std::string p2;
+    if (l.moe_cpu_prefill >= 0) p2 = std::string("CPU-prefill = ") + (l.moe_cpu_prefill ? "on" : "off");
+    if (l.moe_cache_gib > 0) {
+        char b[32]; snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
+        p2 += (p2.empty() ? "" : "   ") + std::string(b);
+    }
+    if (disp_width(p2) > W - 5 && !p2.empty()) {        // узкая панель — делим по пробелам
+        size_t sp = p2.find("   ");
+        if (sp != std::string::npos) {
+            box_row(f, {{p2.substr(0, sp), C_DIM}});
+            p2 = p2.substr(sp + 3);
+        }
+    }
+    if (!p1.empty()) box_row(f, {{p1, C_DIM}});
+    if (!p2.empty()) box_row(f, {{p2, C_DIM}});
+}
+
+// v2.2d (Шеф 02.11): RAM/SWAP процесса модели — ДВА бара в одну строку вместо «mem RAM ... swap ...».
+// Шкала — от системного тотала: RAM 11.5G из 121.5G ≈ 9%. Для Strata строка не рисуется вовсе
+// (просьба Шефа: расход памяти движка и так виден из системных панелей RAM/GPU выше).
+static void mem_bars(std::vector<std::vector<Seg>>& f, const LLMStats& l, const RAMStats& r) {
+    if (l.rss_gb < 0 || l.engine == "strata") return;
+    double swp = l.swap_gb >= 0 ? l.swap_gb : 0.0;
+    int bw = (W - 6 - 26) / 2;
+    if (bw < 3) {                                       // экстремально узко — только числа
+        char mb[48]; snprintf(mb, sizeof(mb), "RAM %4.1f Gb  SWAP %4.1f Gb", l.rss_gb, swp);
+        box_row(f, {{mb, swp > 0.5 ? C_ACT : C_DIM}});
+        return;
+    }
+    if (bw > 10) bw = 10;
+    char a1[24], a2[24];
+    snprintf(a1, sizeof(a1), "RAM %4.1fG ", l.rss_gb);
+    snprintf(a2, sizeof(a2), "SWAP %4.1fG ", swp);
+    double p1 = (r.total_gb > 0) ? l.rss_gb / r.total_gb * 100.0 : -1.0;
+    double p2 = (r.swap_total_gb > 0) ? swp / r.swap_total_gb * 100.0 : -1.0;
+    std::vector<Seg> row;
+    row.push_back({a1, C_TXT});
+    add_bar(row, p1, bw);
+    row.push_back({" ", C_TXT});
+    row.push_back({a2, C_TXT});
+    add_bar(row, p2, bw);                                // Своп подсвечивает градиент: чем больше — тем тревожнее
+    box_row(f, row);
+}
+
 static void box_row(std::vector<std::vector<Seg>>& f, const std::vector<Seg>& content) {
     std::vector<Seg> line;
     line.push_back({"│ ", C_SEC});
@@ -318,6 +393,54 @@ static int bar_len(int w) {
     if (n < 8) n = 8;
     if (n > 24) n = 24;
     return n;
+}
+
+// v2.2d (Шеф 02.11): постоянная io-строка диска (рядом с bar_row — те же колонки,
+// поэтому бары стоят в одной линии со всеми остальными барами панели).
+// Пауза: «io sda idle» + пустой бар. Работа: ↓/↑ и бар от лог-шкалы скорости.
+void io_row(std::vector<std::vector<Seg>>& f, const DiskStats& d) {
+    double r = d.read_mbs > 0 ? d.read_mbs : 0.0;
+    double w = d.write_mbs > 0 ? d.write_mbs : 0.0;
+    double tot = r + w;
+    bool act = (tot > 0.05) || (d.busy_percent > 2.0);
+    int bl = bar_len(W);
+    int desc_w = W - 11 - bl - 1;
+    if (desc_w < 8) desc_w = 8;
+    std::string head = "io " + std::string(d.name);
+    std::vector<Seg> desc;
+    if (!act) {
+        desc.push_back({head + "  ", C_DIM});
+        desc.push_back({"idle", C_DIM});
+    } else {
+        std::string rs = io_rate(r), ws = io_rate(w);
+        bool both = (disp_width(head + "  \u2193 " + rs + "  \u2191 " + ws) <= desc_w);
+        bool show_r = both ? true : (r >= w);       // узкая панель — ТОТ поток, что грузит диск
+        desc.push_back({head + " ", C_DIM});
+        desc.push_back({show_r ? "\u2193 " : "\u2191 ", C_SEC});
+        desc.push_back({show_r ? rs : ws, C_TXT});
+        if (both) {
+            desc.push_back({"  \u2191 ", C_SEC});
+            desc.push_back({ws, C_TXT});
+        }
+    }
+    std::vector<Seg> line;
+    line.push_back({"\u2502 ", C_SEC});
+    for (auto& s : fit_width(desc, desc_w)) line.push_back(s);
+    line.push_back({" ", C_TXT});
+    std::string vs; attr_t va = C_DIM;
+    if (act && d.busy_percent >= 0) {               // число = busy% ядра (— если ядро не считает)
+        char b[16]; snprintf(b, sizeof(b), "%.0f%%", d.busy_percent);
+        vs = b; va = pct_attr(d.busy_percent);
+    } else {
+        vs = "\u2014";
+    }
+    int vw = disp_width(vs);
+    if (vw < 5) vs = vs + std::string(5 - vw, ' ');
+    line.push_back({vs, va});
+    line.push_back({" ", C_TXT});
+    add_bar(line, act ? io_bar_pct(tot, d) : -1.0, bl);
+    line.push_back({"\u2502", C_SEC});
+    f.push_back(fit_width(line, W));
 }
 
 void bar_row(std::vector<std::vector<Seg>>& f, std::vector<Seg> desc, double value,
@@ -492,18 +615,12 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
                      act ? 0 : (l.last_truncated >= 0 ? l.last_truncated : 0));
             box_row(f, {{tb, act ? C_ACT : C_DIM}});
         }
-        // v2.2: MOE-размещение (Strata) — куда легли эксперты и сколько VRAM осталось
-        // v2.2c: длинная строка переносится по «·», а не обрезается
-        if (!l.moe.empty())
-            moe_rows(f, l.moe);
-        // v2.2: RAM/своп процесса модели — видно давление на память.
-        // Для чужих/контейнерных процессов без прав может быть недоступно — тогда строки нет.
-        if (l.rss_gb >= 0) {
-            char mb[64];
-            snprintf(mb, sizeof(mb), "mem  RAM %5.1f Gb  swap %4.1f Gb", l.rss_gb,
-                     l.swap_gb >= 0 ? l.swap_gb : 0.0);
-            box_row(f, {{mb, (l.swap_gb > 0.5) ? C_ACT : C_DIM}});
-        }
+        // v2.2: MOE-размещение (Strata) — куда легли эксперты
+        // v2.2d: компактно; VRAM free и строка mem для Strata убраны (дублируют системные панели)
+        if (!l.moe.empty() || l.moe_experts > 0)
+            moe_compact(f, l);
+        // v2.2: RAM/своп процесса модели; v2.2d — два бара в одну строку (не для Strata)
+        mem_bars(f, l, c.ram);
     }
 
     // Sensors — hwmon-датчики кроме CPU/GPU (NVMe, сетевые PHY/MAC, ...)
@@ -556,31 +673,10 @@ std::vector<std::vector<Seg>> build_frame(const Collector& c, const FrameOpts& o
             } else {
                 bar_row(f, desc, d.usage_percent, "%");
             }
-            // v2.2: строка активности появляется ТОЛЬКО когда диск реально дёргают —
-            // это детектор «модель лезет на NVMe» (бар = % времени, занятый IO)
-            if (d.read_mbs >= 0 || d.write_mbs >= 0 || d.busy_percent > 2.0) {
-                double r = d.read_mbs > 0 ? d.read_mbs : 0.0;
-                double w = d.write_mbs > 0 ? d.write_mbs : 0.0;
-                if (r + w > 0.05 || d.busy_percent > 2.0) {
-                    // v2.2c: компактный формат; в узкой панели показываем ТОТ поток,
-                    // который и вызвал активность (а не «↓ 0.0» при активной записи)
-                    std::string head = "io " + std::string(d.name);
-                    std::string rs = io_rate(r), ws = io_rate(w);
-                    int desc_w = W - 11 - bar_len(W) - 1;
-                    if (desc_w < 8) desc_w = 8;
-                    bool both = (disp_width(head + "  \u2193 " + rs + "  \u2191 " + ws) <= desc_w);
-                    bool show_r = both ? true : (r >= w);
-                    std::vector<Seg> io;
-                    io.push_back({head + " ", C_DIM});
-                    io.push_back({show_r ? "\u2193 " : "\u2191 ", C_SEC});
-                    io.push_back({show_r ? rs : ws, C_TXT});
-                    if (both) {
-                        io.push_back({"  \u2191 ", C_SEC});
-                        io.push_back({ws, C_TXT});
-                    }
-                    bar_row(f, io, d.busy_percent, "%");
-                }
-            }
+            // v2.2d (Шеф 02.11): строка io под каждым диском ПОСТОЯННА (раньше появлялась
+            // только при активности и «прыгала» по высоте панели) — меняется только содержимое:
+            // в паузе «idle», в работе — ↓/↑ и бар активности (лог-шкала от потолка устройства).
+            io_row(f, d);
         }
     }
 
