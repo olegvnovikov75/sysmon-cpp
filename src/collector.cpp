@@ -143,6 +143,73 @@ static double steady_now() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// ---------- v2.1: Strata (X99) ----------
+// Запись launch-JSON Strata: порт, engine/server-логи, имя модели.
+struct StrataLaunchMeta {
+    std::string log, server_log, model;
+    int port = 0;
+};
+
+static bool json_str_field(const std::string& j, const std::string& key, std::string& out) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return false;
+    size_t c = j.find(':', p + pat.size());
+    if (c == std::string::npos) return false;
+    size_t q1 = j.find('"', c);
+    if (q1 == std::string::npos) return false;
+    size_t q2 = j.find('"', q1 + 1);
+    if (q2 == std::string::npos) return false;
+    out = j.substr(q1 + 1, q2 - q1 - 1);
+    return true;
+}
+
+static bool json_int_field(const std::string& j, const std::string& key, int& out) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return false;
+    size_t c = j.find(':', p + pat.size());
+    if (c == std::string::npos) return false;
+    out = atoi(j.c_str() + c + 1);
+    return out > 0;
+}
+
+// значение после "--pack" в args массива launch-JSON
+static std::string json_pack_value(const std::string& jc) {
+    size_t p = jc.find("\"--pack\"");
+    if (p == std::string::npos) return "";
+    size_t q1 = jc.find('"', p + 8);
+    if (q1 == std::string::npos) return "";
+    size_t q2 = jc.find('"', q1 + 1);
+    if (q2 == std::string::npos) return "";
+    return jc.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// Число из строки, начиная с pos; поддержка тысяч через запятую ('24,030').
+static double parse_num_at(const std::string& l, size_t pos) {
+    while (pos < l.size() && !std::isdigit((unsigned char)l[pos])) pos++;
+    std::string num;
+    while (pos < l.size()) {
+        char ch = l[pos];
+        if (std::isdigit((unsigned char)ch)) { num += ch; pos++; }
+        else if (ch == '.' && !num.empty() && num.find('.') == std::string::npos) { num += ch; pos++; }
+        else if (ch == ',' && !num.empty() && pos + 3 < l.size() &&
+                 std::isdigit((unsigned char)l[pos + 1]) && std::isdigit((unsigned char)l[pos + 2]) &&
+                 std::isdigit((unsigned char)l[pos + 3])) { pos++; }   // разделитель тысяч
+        else break;
+    }
+    return num.empty() ? -1.0 : atof(num.c_str());
+}
+
+// Число, стоящее перед позицией pos (для '93.3 tok/s' ищем по 'tok/s' назад).
+static double parse_num_before(const std::string& l, size_t pos) {
+    while (pos > 0 && l[pos - 1] == ' ') pos--;
+    size_t end = pos;
+    while (pos > 0 && (std::isdigit((unsigned char)l[pos - 1]) || l[pos - 1] == '.')) pos--;
+    if (pos == end) return -1.0;
+    return atof(l.substr(pos, end - pos).c_str());
+}
+
 // Маркер llama-server → обновление состояния. Форматы: классический llama.cpp и
 // unsloth-форк (87G): 'draft acceptance = 0.513 (...)', 'f_sim_best = 0.967' —
 // v2.0 чинит spec accept и cache reuse для 87G (раньше маркеры не совпадали).
@@ -248,6 +315,79 @@ static void apply_log_line(LlmLogState& s, const std::string& l, double now) {
         if (c2 > c1) {
             s.gen_tps = atof(l.substr(c1, c2 - c1).c_str());
             s.ts_gen = now;
+        }
+    }
+    // ---------- v2.1: маркеры Strata (engine-лог, итог запроса) ----------
+    // 'strata serve: prompt N tokens = R reused + U read in MS ms (P tok/s),
+    //   G generated in GS ms (X tok/s), drafts accepted A of B, C checkpoints'
+    p = l.find(" tokens = ");
+    if (p != std::string::npos) {
+        size_t pp = (p > 7) ? l.rfind("prompt ", p) : std::string::npos;
+        size_t ru = l.find(" reused + ", p);
+        size_t ri = (ru == std::string::npos) ? std::string::npos : l.find(" read in ", ru);
+        if (pp != std::string::npos && ri != std::string::npos) {
+            double n      = parse_num_at(l, pp + 7);
+            double reused = parse_num_at(l, p + 10);
+            size_t par1   = l.find('(', ri);
+            double ptok   = (par1 == std::string::npos) ? -1.0 : parse_num_at(l, par1);
+            size_t gi     = (par1 == std::string::npos) ? std::string::npos : l.find(" generated in ", par1);
+            double gn     = parse_num_at(l, gi);
+            size_t par2   = (gi == std::string::npos) ? std::string::npos : l.find('(', gi);
+            double gtok   = (par2 == std::string::npos) ? -1.0 : parse_num_at(l, par2);
+            if (n > 0) {
+                s.ctx_used = (int)n;
+                if (reused >= 0) s.cache_reuse_percent = 100.0 * reused / n;
+                s.last_task++;                     // у Strata нет №task — считаем завершённые запросы
+                s.live_prompt = (int)n;
+                s.live_gen = (gn > 0) ? (int)gn : 0;
+            }
+            if (ptok > 0) {
+                s.prefill_samples.push_back(ptok);
+                if (s.prefill_samples.size() > 30) s.prefill_samples.pop_front();
+            }
+            if (gtok > 0) s.gen_tps = gtok;
+            size_t da = l.find("drafts accepted ");
+            if (da != std::string::npos) {
+                double a = parse_num_at(l, da + 16);
+                size_t ofp = l.find(" of ", da + 16);
+                double b = (ofp == std::string::npos) ? -1.0 : parse_num_at(l, ofp + 4);
+                if (a > 0 && b > 0) s.spec_accept_percent = 100.0 * a / b;
+            }
+        }
+    }
+    // ---------- v2.1: маркеры Strata (server-лог, живые) ----------
+    // 'reading the prompt: 19,776 of 24,030 tokens, 4 s so far' — живой префилл
+    p = l.find("reading the prompt: ");
+    if (p != std::string::npos) {
+        double cur = parse_num_at(l, p + 20);
+        size_t ofp = l.find(" of ", p);
+        double tot = (ofp == std::string::npos) ? -1.0 : parse_num_at(l, ofp + 4);
+        if (cur > 0) s.live_prompt = (int)cur;
+        if (tot > s.ctx_used) s.ctx_used = (int)tot;   // ctx живой, ещё до итоговой строки движка
+        s.ts_prefill = now;
+    }
+    // 'thinking: 90 of budget 24576 (max 32768) tokens, 94.7 tok/s, 11 s'
+    // 'writing a tool call: exec: 1101 of max 32768 tokens, 90.6 tok/s, 20 s'
+    p = l.find("thinking: ");
+    if (p == std::string::npos) p = l.find("writing a tool call: ");
+    if (p != std::string::npos) {
+        double g = parse_num_at(l, p);
+        size_t tsp = l.find("tok/s", p);
+        double sp = (tsp == std::string::npos) ? -1.0 : parse_num_before(l, tsp);
+        if (g > 0) s.live_gen = (int)g;
+        if (sp > 0) s.gen_tps = sp;
+        s.ts_gen = now;
+    }
+    // 'done: 1259 tokens in 21 s (93.3 tok/s)' — итог генерации (не маркер активности)
+    p = l.find("done: ");
+    if (p != std::string::npos) {
+        size_t ti = l.find(" tokens in ", p);
+        if (ti != std::string::npos) {
+            size_t tsp = l.find("tok/s", ti);
+            if (tsp != std::string::npos) {
+                double v = parse_num_before(l, tsp);
+                if (v > 0) s.gen_tps = v;
+            }
         }
     }
     // cache reuse: 'sim_best = X' / unsloth-форк: 'f_sim_best = X' (0..1)
@@ -981,10 +1121,15 @@ void Collector::collect_llm() {
         // строки "llama-server" в cmdline нет (аргументы разделены нулями!),
         // но аргументы -m/--alias/-c и путь .gguf на месте
         bool is_docker_llm = false;
+        bool is_strata = false;   // v2.1: движок Strata (X99)
         if (raw.find("llama-server") == std::string::npos) {
             bool docker_run = (args.size() >= 2 && basename_of(args[0]) == "docker" && args[1] == "run");
             bool looks_llm = (raw.find("--alias") != std::string::npos || raw.find(".gguf") != std::string::npos);
             if (docker_run && looks_llm) is_docker_llm = true;
+            else if (args.size() >= 2 && basename_of(args[0]) == "strata" &&
+                     raw.find("--serve") != std::string::npos &&
+                     raw.find("--pack") != std::string::npos)
+                is_strata = true;   // 'strata --serve --pack … --native …gguf' — порт НЕ в cmdline
             else continue;
         }
 
@@ -1002,6 +1147,56 @@ void Collector::collect_llm() {
                 }
             }
         }
+        // v2.1: Strata (X99) — порт и логи берутся из launch-JSON (~/.local/state/strata)
+        std::string strata_engine_log, strata_server_log, strata_model;
+        if (is_strata) {
+            static std::map<std::string, StrataLaunchMeta> by_pack;   // pack basename → мета (кэш 30 с)
+            static double meta_ts = -1e18;
+            double nowm = steady_now();
+            if (nowm - meta_ts > 30.0) {
+                meta_ts = nowm;
+                by_pack.clear();
+                const char* home = getenv("HOME");
+                if (home) {
+                    glob_t gl;
+                    std::string pat = std::string(home) + "/.local/state/strata/launch/*.json";
+                    if (glob(pat.c_str(), GLOB_NOSORT, nullptr, &gl) == 0) {
+                        for (size_t gi = 0; gi < gl.gl_pathc; gi++) {
+                            std::ifstream jf(gl.gl_pathv[gi]);
+                            if (!jf.is_open()) continue;
+                            std::string jc((std::istreambuf_iterator<char>(jf)),
+                                            std::istreambuf_iterator<char>());
+                            StrataLaunchMeta m;
+                            if (!json_int_field(jc, "port", m.port)) continue;
+                            json_str_field(jc, "log", m.log);
+                            json_str_field(jc, "model_name", m.model);
+                            if (m.log.empty()) continue;
+                            // имя engine-лога → server-лог в runtime/ (launch-<preset>.server.log)
+                            size_t sl = m.log.find("/launch/");
+                            if (sl != std::string::npos) {
+                                std::string base = basename_of(m.log);
+                                size_t dot = base.find(".engine.log");
+                                if (dot != std::string::npos)
+                                    m.server_log = m.log.substr(0, sl) + "/runtime/launch-" +
+                                                   base.substr(0, dot) + ".server.log";
+                            }
+                            std::string packv = json_pack_value(jc);
+                            if (!packv.empty()) by_pack[basename_of(packv)] = m;
+                        }
+                        globfree(&gl);
+                    }
+                }
+            }
+            std::string packv = arg_value(args, {"--pack"});
+            if (!packv.empty()) packv = basename_of(packv);
+            auto it = by_pack.find(packv);
+            if (it == by_pack.end()) continue;   // launch-JSON не найден — порт неизвестен
+            port = it->second.port;
+            strata_engine_log = it->second.log;
+            strata_server_log = it->second.server_log;
+            strata_model = it->second.model;
+        }
+
         if (port <= 0) continue;
 
         std::string model = arg_value(args, {"--alias"});
@@ -1009,8 +1204,9 @@ void Collector::collect_llm() {
             model = arg_value(args, {"-m", "--model"});
             if (!model.empty()) model = basename_of(model);
         }
+        if (model.empty()) model = strata_model;   // v2.1: model_name из launch-JSON
 
-        std::string ctx_s = arg_value(args, {"-c", "--ctx-size"});
+        std::string ctx_s = arg_value(args, {"-c", "--ctx-size", "--max-context"});
         int ctx_limit = atoi(ctx_s.c_str());
 
         LLMStats llm;
@@ -1036,13 +1232,48 @@ void Collector::collect_llm() {
             }
             }
         }
-        // v2.0: инкрементальное состояние на каждый файл лога
+        if (!strata_engine_log.empty()) log_path = strata_engine_log;   // v2.1: Strata — engine-лог из JSON
+        // v2.0: инкрементальное состояние на каждый файл лога.
+        // v2.1: Strata даёт ДВА лога (engine — итоги запроса, server — живые маркеры).
+        // Состояние — на каждый файл (offset/ino-защита работает поштучно), потом мёрж.
         static std::map<std::string, LlmLogState> log_states;
+        struct StrataStates { LlmLogState eng, srv; };
+        static std::map<std::string, StrataStates> strata_states;
+        LlmLogState s;   // итоговое состояние для этой записи LLM
+        bool have_state = false;
         if (!log_path.empty()) {
-            LlmLogState& s = log_states[log_path];
-            update_llm_log(s, log_path);
+            if (!strata_engine_log.empty()) {
+                StrataStates& ds = strata_states[strata_engine_log];
+                update_llm_log(ds.eng, strata_engine_log);
+                if (!strata_server_log.empty()) update_llm_log(ds.srv, strata_server_log);
+                LlmLogState& e = ds.eng; LlmLogState& v = ds.srv;
+                s.ctx_used = std::max(e.ctx_used, v.ctx_used);
+                s.last_task = e.last_task;               // № запросов считает engine-лог
+                s.last_truncated = e.last_truncated;
+                s.spec_accept_percent = e.spec_accept_percent;
+                s.cache_reuse_percent = e.cache_reuse_percent;
+                s.prefill2_tps = (e.prefill2_tps > 0) ? e.prefill2_tps : v.prefill2_tps;
+                s.prefill_samples = e.prefill_samples;
+                // gen — из более свежего источника
+                s.gen_tps = (v.ts_gen >= e.ts_gen) ? v.gen_tps : e.gen_tps;
+                if (s.gen_tps <= 0) s.gen_tps = std::max(e.gen_tps, v.gen_tps);
+                s.ts_gen = std::max(e.ts_gen, v.ts_gen);
+                s.ts_prefill = std::max(e.ts_prefill, v.ts_prefill);
+                // живые счётчики — из более свежего лога (server стримит, engine — итог)
+                double act_v = std::max(v.ts_gen, v.ts_prefill), act_e = std::max(e.ts_gen, e.ts_prefill);
+                const LlmLogState& fresh = (act_v >= act_e) ? v : e;
+                s.live_prompt = fresh.live_prompt;
+                s.live_gen = fresh.live_gen;
+            } else {
+                LlmLogState& sref = log_states[log_path];
+                update_llm_log(sref, log_path);
+                s = sref;
+            }
+            have_state = true;
+        }
+        if (have_state) {
             llm.ctx_used = s.ctx_used;                     // §6.8c: держим всё время жизни
-            llm.last_task = s.last_task;
+            llm.last_task = s.last_task;   // v2.1: для Strata — счётчик завершённых запросов
             llm.last_truncated = s.last_truncated;
             llm.spec_accept_percent = s.spec_accept_percent;
             llm.cache_reuse_percent = s.cache_reuse_percent;
