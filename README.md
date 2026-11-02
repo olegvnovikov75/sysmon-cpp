@@ -9,7 +9,11 @@ C++-переработка bash-скрипта `sysmon.sh`: тот же набо
 
 ## Снимок (v2.2h: live, локальная машина `.213` + remote `-ip .42`, две панели)
 
-![SYSMON v2.2h](docs/sysmon_v2.2h.png)
+![SYSMON v2.2h — 256 цветов](docs/sysmon_v2.2h_256.png)
+
+Картинка отрендерена напрямую из ANSI-буфера рабочего терминала (`tmux capture-pane -e`) —
+это честные цвета 256-цветной палитры xterm: градиент баров синий → циан → зелёный → жёлтый → красный.
+(Прежний снимок 16-цветный: [`docs/sysmon_v2.2h.png`](docs/sysmon_v2.2h.png), снимок v2.0: [`docs/sysmon_v.2.png`](docs/sysmon_v.2.png).)
 
 Снимок сделан с рабочего терминала (tmux 85×54, `sysmon -ip 192.168.1.42`) — это реальная картина,
 а не макет: слева Strix с двумя движками llama.cpp (`8092` Qwen3.8-Flash-Next + `8090` bge-m3),
@@ -46,17 +50,17 @@ LLM gen/prefill — из свежих строк лога движка (сгла
 на мониторе; собран на Ubuntu 24.04, требует glibc ≥ 2.38, динамический: нужны только
 `libncursesw6`, `libtinfo6`, `libcurl4`). Берётся прямо из дерева: `curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/raw/master/sysmon-ubuntu`.
 
-⚠ В **релизах** GitHub бинарники выложены только для **v2.0** (в том числе Windows). Текущую
-версию для Windows пока надо собрать самому (mingw, см. историю коммитов v2.0/v2.1) — статический
-`.exe` v2.0 в wine рабочий, но без v2.1/v2.2.
+✅ В релизе **[v2.2h](https://github.com/olegvnovikov75/sysmon-cpp/releases/tag/v2.2h)** — все три
+ассета: Ubuntu-бинарник, Windows `.exe` (собран mingw: ncurses 6.4 term-driver + curl 8.10.1 Schchannel,
+проверен в wine) и исходники. Релизы v2.0/v1.5.0 остаются как исторические.
 
 | Платформа | Файл | Ссылка |
 |---|---|---|
-| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-ubuntu) |
-| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-windows-console.exe) |
-| Исходники | `sysmon-cpp-v2.0-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.0/sysmon-cpp-v2.0-src.tar.gz) |
+| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2h/sysmon-ubuntu) |
+| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2h/sysmon-windows-console.exe) |
+| Исходники | `sysmon-cpp-v2.2h-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2h/sysmon-cpp-v2.2h-src.tar.gz) |
 
-Примечание: Windows-бинарник v2.0 пересобран (mingw, статический) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
+Примечание: Windows-бинарник v2.2h собран статическим (mingw) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
 
 Все релизы: [github.com/olegvnovikov75/sysmon-cpp/releases](https://github.com/olegvnovikov75/sysmon-cpp/releases)
 
