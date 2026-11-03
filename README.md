@@ -33,21 +33,21 @@ LLM gen/prefill — из свежих строк лога движка (сгла
 
 ## Готовые бинарники
 
-✅ `sysmon-ubuntu` в корне репозитория — **актуальной версии v2.2i** (тот же бинарник, что работает
+✅ `sysmon-ubuntu` в корне репозитория — **актуальной версии v2.3** (тот же бинарник, что работает
 на мониторе; собран на Ubuntu 24.04, требует glibc ≥ 2.38, динамический: нужны только
 `libncursesw6`, `libtinfo6`, `libcurl4`). Берётся прямо из дерева: `curl -L -o ~/sysmon https://github.com/olegvnovikov75/sysmon-cpp/raw/master/sysmon-ubuntu`.
 
-✅ В релизе **[v2.2i](https://github.com/olegvnovikov75/sysmon-cpp/releases/tag/v2.2i)** — все три
+✅ В релизе **[v2.3](https://github.com/olegvnovikov75/sysmon-cpp/releases/tag/v2.3)** — все три
 ассета: Ubuntu-бинарник, Windows `.exe` (собран mingw: ncurses 6.4 term-driver + curl 8.10.1 Schchannel,
-проверен в wine) и исходники. Релизы v2.0/v1.5.0 остаются как исторические.
+проверен в wine: snapshot + JSON-сервер отвечает HTTP 200) и исходники. Релизы v2.2i/v2.2h/v2.0/v1.5.0 остаются как исторические.
 
 | Платформа | Файл | Ссылка |
 |---|---|---|
-| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2i/sysmon-ubuntu) |
-| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2i/sysmon-windows-console.exe) |
-| Исходники | `sysmon-cpp-v2.2i-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.2i/sysmon-cpp-v2.2i-src.tar.gz) |
+| Ubuntu/Debian (x86-64, glibc) | `sysmon-ubuntu` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.3/sysmon-ubuntu) |
+| Windows (console, x86-64, статический) | `sysmon-windows-console.exe` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.3/sysmon-windows-console.exe) |
+| Исходники | `sysmon-cpp-v2.3-src.tar.gz` | [скачать](https://github.com/olegvnovikov75/sysmon-cpp/releases/download/v2.3/sysmon-cpp-v2.3-src.tar.gz) |
 
-Примечание: Windows-бинарник v2.2i собран статическим (mingw) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
+Примечание: Windows-бинарник v2.3 собран статическим (mingw) — проверен в wine: snapshot, TUI, JSON-сервер. На чистой Windows без WSL секции CPU/RAM/Disks/Sensors могут быть пустыми (/proc и /sys нет), GPU через nvidia-smi и LLM работают.
 
 Все релизы: [github.com/olegvnovikov75/sysmon-cpp/releases](https://github.com/olegvnovikov75/sysmon-cpp/releases)
 
