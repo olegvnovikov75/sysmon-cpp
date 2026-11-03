@@ -120,6 +120,11 @@ struct LLMStats {
     std::string moe_place;              // "GPU" | "host"
     int moe_cpu_prefill = -1;           // -1 неизвестно, 0 выключен, 1 включён
     double moe_cache_gib = -1.0;        // expert cache
+    // v2.3: ЧЕСТНЫЕ слоты кэша: сколько движок реально выделил («expert cache N slots»)
+    // и сколько обещал «expert cache auto: … -> N slots» (оценка по свободному VRAM).
+    // 24576 в панели — это ВСЕГИДА полное число экспертов модели, а не то, что влезло.
+    int moe_cache_slots = -1;
+    int moe_auto_slots = -1;
     double moe_vram_free_gib = -1.0;    // остаток VRAM (в TUI больше не рисуется — видно в GPU-панели)
 };
 

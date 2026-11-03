@@ -144,6 +144,8 @@ struct LlmLogState {
     std::string moe_place;                      // "GPU" | "host"
     int moe_cpu_prefill = -1;                   // -1 неизвестно, 0 выключен, 1 включён
     double moe_cache_gib = -1.0;                // размер expert cache
+    int moe_cache_slots = 0;                    // v2.3: СЛОТЫ кэша, реально выделенные движком
+    int moe_auto_slots = 0;                     // v2.3: сколько обещал «expert cache auto»
     double moe_vram_free_mib = -1.0;            // свободный остаток VRAM
 };
 
@@ -269,6 +271,27 @@ static void apply_moe_line(LlmLogState& s, const std::string& l) {
         // а не первый номер после «cache» (там число слотов)
         double g = parse_num_before(l, q);
         if (g > 0) s.moe_cache_gib = g;
+        // v2.3: там же — РЕАЛЬНО выделенные слоты кэша (не профильные 24576, а сколько влезло:
+        // 256k → 24576, 160k → 24036, 8k → …). Это и есть честная цифра для панели.
+        double sl = parse_num_at(l, p + 13);
+        if (sl > 0) s.moe_cache_slots = (int)sl;
+    }
+    // v2.3: «expert cache auto: … -> 18473 slots» — оценка движка из свободного запаса,
+    // НЕ то же число, что выделенные слоты. Храним отдельно, чтобы не путать.
+    if ((p = l.find("expert cache auto:")) != std::string::npos) {
+        size_t ar = l.rfind("->");
+        if (ar != std::string::npos && ar > p) {
+            double sl = parse_num_at(l, ar + 2);
+            if (sl > 0) s.moe_auto_slots = (int)sl;
+        }
+    }
+    // v2.3: «profile …: 24576 ranked pairs, built for 24576 slots» — всего экспертов в модели.
+    // Раньше total брался только из строки «every expert is in the GPU cache (N of N)»,
+    // которой нет, когда в кэш легли не все эксперты → панель рисовала 24036 без «/24576».
+    if ((p = l.find("built for ")) != std::string::npos &&
+        l.find(" slots", p) != std::string::npos && s.moe_total <= 0) {
+        double t = parse_num_at(l, p + 10);
+        if (t > 0) s.moe_total = (int)t;
     }
     if ((p = l.find("MiB of VRAM free")) != std::string::npos) {
         double m = parse_num_before(l, p);
@@ -354,7 +377,11 @@ static std::string build_moe_line(const LlmLogState& s) {
     }
     if (s.moe_cpu_prefill >= 0) add(std::string("CPU-prefill ") + (s.moe_cpu_prefill ? "on" : "off"));
     if (s.moe_cache_gib > 0) {
-        char b[32]; snprintf(b, sizeof(b), "cache %.1f Gb", s.moe_cache_gib);
+        char b[64];
+        if (s.moe_cache_slots > 0)
+            snprintf(b, sizeof(b), "cache %.1f Gb / %d slots", s.moe_cache_gib, s.moe_cache_slots);
+        else
+            snprintf(b, sizeof(b), "cache %.1f Gb", s.moe_cache_gib);
         add(b);
     }
     if (s.moe_vram_free_mib > 0) {
@@ -1349,6 +1376,112 @@ void Collector::collect_net() {
 
 // ---------- LLM (llama-server) ----------
 
+// ---------- v2.3: живая привязка Strata (порт — из слушающего сокета) ----------
+// Дескрипторы ~/.local/state/strata/launch/*.json переживают мини-тесты: запуск
+// мини-профиля на том же пакете оставлял свой JSON, и плитка показывала мёртвый порт
+// и мёртвые цифры при живом процессе. Источник истины теперь — САМ ПРОЦЕСС:
+//   · порт — из LISTEN-сокета процесса или его родителя (у Strata слушает python-обвязка
+//     serve.server, движок — её ребёнок);
+//   · engine-лог — из fd 1/2 самого движка (они открыты на launch/<тег>.engine.log);
+//   · launch-JSON — только справочник (имя модели, server-лог), ищется по тегу лога.
+static void listen_inode_ports(std::map<std::string, int>& out) {   // fd-ключ → порт
+    const char* files[] = {"/proc/net/tcp", "/proc/net/tcp6"};
+    for (int fi = 0; fi < 2; fi++) {
+        std::ifstream f(files[fi]);
+        if (!f.is_open()) continue;
+        std::string line;
+        bool hdr = true;
+        while (std::getline(f, line)) {
+            if (hdr) { hdr = false; continue; }
+            std::istringstream ss(line);
+            std::string sl, la, ra, st, tx, tr, tmo, uid, rew, ino, rest;
+            if (!(ss >> sl >> la >> ra >> st >> tx >> tr >> tmo >> uid >> rew >> ino)) continue;
+            if (st != "0A") continue;                       // 0A = LISTEN
+            size_t col = la.find(':');
+            if (col == std::string::npos) continue;
+            int p = (int)strtol(la.c_str() + col + 1, NULL, 16);
+            if (p > 0) out["socket:[" + ino + "]"] = p;
+        }
+    }
+}
+
+static long ppid_of(long pid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/status", pid);
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line))
+        if (line.rfind("PPid:", 0) == 0) return atol(line.c_str() + 5);
+    return 0;
+}
+
+// engine-лог этого процесса (fd 1/2) — точнее нельзя: это то, куда движок ПИШЕТ сейчас
+static std::string fd_engine_log(long pid) {
+    for (int fd = 1; fd <= 2; fd++) {
+        char lp[80];
+        snprintf(lp, sizeof(lp), "/proc/%ld/fd/%d", pid, fd);
+        char tb[1024];
+        ssize_t n = readlink(lp, tb, sizeof(tb) - 1);
+        if (n <= 0) continue;
+        tb[n] = '\0';
+        std::string t(tb);
+        if (t.find("/launch/") != std::string::npos &&
+            t.find(".engine.log") != std::string::npos) return t;
+    }
+    return "";
+}
+
+// порт LISTEN-сокета, который держит процесс или один из его предков
+static int listen_port_of_tree(long pid) {
+    static std::map<std::string, int> ports;   // кэш карты сокетов на 5 с
+    static double pts = -1e18;
+    double nowm = steady_now();
+    if (nowm - pts > 5.0) { pts = nowm; ports.clear(); listen_inode_ports(ports); }
+    if (ports.empty()) return 0;
+    long cur = pid;
+    for (int hop = 0; hop < 6 && cur > 1; hop++) {
+        char dir[64];
+        snprintf(dir, sizeof(dir), "/proc/%ld/fd", cur);
+        DIR* d = opendir(dir);
+        if (d) {
+            struct dirent* e;
+            while ((e = readdir(d)) != NULL) {
+                if (e->d_name[0] == '.') continue;
+                char lp[320];
+                snprintf(lp, sizeof(lp), "%s/%s", dir, e->d_name);
+                char tb[256];
+                ssize_t n = readlink(lp, tb, sizeof(tb) - 1);
+                if (n <= 0) continue;
+                tb[n] = '\0';
+                auto it = ports.find(std::string(tb));
+                if (it != ports.end()) { closedir(d); return it->second; }
+            }
+            closedir(d);
+        }
+        cur = ppid_of(cur);
+    }
+    return 0;
+}
+
+// server-лог Strata из пути engine-лога (launch/<тег>.engine.log → runtime/launch-<тег>.server.log)
+static std::string strata_server_log_for(const std::string& engine_log) {
+    if (engine_log.empty()) return "";
+    size_t sl = engine_log.find("/launch/");
+    if (sl == std::string::npos) return "";
+    std::string base = basename_of(engine_log);
+    size_t dot = base.find(".engine.log");
+    if (dot == std::string::npos) return "";
+    return engine_log.substr(0, sl) + "/runtime/launch-" + base.substr(0, dot) + ".server.log";
+}
+
+// тег запуска из имени engine-лога: «iq3_s-160k.engine.log» → «iq3_s-160k»
+static std::string strata_tag_of_log(const std::string& engine_log) {
+    if (engine_log.empty()) return "";
+    std::string base = basename_of(engine_log);
+    size_t dot = base.find(".engine.log");
+    return (dot == std::string::npos) ? "" : base.substr(0, dot);
+}
+
 static std::string arg_value(const std::vector<std::string>& args, const std::vector<std::string>& names) {
     for (size_t i = 0; i < args.size(); i++) {
         const std::string& a = args[i];
@@ -1425,12 +1558,14 @@ void Collector::collect_llm() {
         // v2.1: Strata (X99) — порт и логи берутся из launch-JSON (~/.local/state/strata)
         std::string strata_engine_log, strata_server_log, strata_model;
         if (is_strata) {
-            static std::map<std::string, StrataLaunchMeta> by_pack;   // pack basename → мета (кэш 30 с)
+            // справочник дескрипторов: по тегу запуска и по имени пакета (кэш 30 с)
+            static std::map<std::string, StrataLaunchMeta> by_pack, by_tag;
             static double meta_ts = -1e18;
             double nowm = steady_now();
             if (nowm - meta_ts > 30.0) {
                 meta_ts = nowm;
                 by_pack.clear();
+                by_tag.clear();
                 const char* home = getenv("HOME");
                 if (home) {
                     glob_t gl;
@@ -1446,30 +1581,39 @@ void Collector::collect_llm() {
                             json_str_field(jc, "log", m.log);
                             json_str_field(jc, "model_name", m.model);
                             if (m.log.empty()) continue;
-                            // имя engine-лога → server-лог в runtime/ (launch-<preset>.server.log)
-                            size_t sl = m.log.find("/launch/");
-                            if (sl != std::string::npos) {
-                                std::string base = basename_of(m.log);
-                                size_t dot = base.find(".engine.log");
-                                if (dot != std::string::npos)
-                                    m.server_log = m.log.substr(0, sl) + "/runtime/launch-" +
-                                                   base.substr(0, dot) + ".server.log";
-                            }
+                            m.server_log = strata_server_log_for(m.log);
                             std::string packv = json_pack_value(jc);
                             if (!packv.empty()) by_pack[basename_of(packv)] = m;
+                            std::string tag = strata_tag_of_log(m.log);        // v2.3
+                            if (!tag.empty()) by_tag[tag] = m;
                         }
                         globfree(&gl);
                     }
                 }
             }
-            std::string packv = arg_value(args, {"--pack"});
-            if (!packv.empty()) packv = basename_of(packv);
-            auto it = by_pack.find(packv);
-            if (it == by_pack.end()) continue;   // launch-JSON не найден — порт неизвестен
-            port = it->second.port;
-            strata_engine_log = it->second.log;
-            strata_server_log = it->second.server_log;
-            strata_model = it->second.model;
+            // v2.3: привязка к ЖИВОМУ процессу: лог — из его fd, порт — из LISTEN-сокета
+            std::string live_log = fd_engine_log(pid);
+            int live_port = listen_port_of_tree(pid);
+            std::string tag = strata_tag_of_log(live_log);
+            const StrataLaunchMeta* meta = nullptr;
+            if (!tag.empty()) {
+                auto jt = by_tag.find(tag);
+                if (jt != by_tag.end()) meta = &jt->second;
+            }
+            if (!meta) {                       // дескриптор этого тега не найден — прежний путь
+                std::string packv = arg_value(args, {"--pack"});
+                if (!packv.empty()) packv = basename_of(packv);
+                auto it = by_pack.find(packv);
+                if (it != by_pack.end()) meta = &it->second;
+            }
+            // порт: живой сокет главнее дескриптора (дескриптор может быть от мини-теста)
+            if (live_port > 0) port = live_port;
+            else if (meta) port = meta->port;
+            if (port <= 0) continue;           // ни сокета, ни дескриптора — плитки не будет
+            strata_engine_log = !live_log.empty() ? live_log
+                              : (meta ? meta->log : std::string());
+            strata_server_log = strata_server_log_for(strata_engine_log);
+            if (meta) strata_model = meta->model;
         }
 
         if (port <= 0) continue;
@@ -1549,6 +1693,9 @@ void Collector::collect_llm() {
                 s.moe_place = !e.moe_place.empty() ? e.moe_place : v.moe_place;
                 s.moe_cpu_prefill = (e.moe_cpu_prefill >= 0) ? e.moe_cpu_prefill : v.moe_cpu_prefill;
                 s.moe_cache_gib = (e.moe_cache_gib > 0) ? e.moe_cache_gib : v.moe_cache_gib;
+                // v2.3: слоты кэша — тоже из engine-лога (server-лог их не печатает)
+                s.moe_cache_slots = (e.moe_cache_slots > 0) ? e.moe_cache_slots : v.moe_cache_slots;
+                s.moe_auto_slots = (e.moe_auto_slots > 0) ? e.moe_auto_slots : v.moe_auto_slots;
                 s.moe_vram_free_mib = (e.moe_vram_free_mib > 0) ? e.moe_vram_free_mib : v.moe_vram_free_mib;
             } else {
                 LlmLogState& sref = log_states[log_path];
@@ -1565,6 +1712,9 @@ void Collector::collect_llm() {
             llm.moe_place = s.moe_place;
             llm.moe_cpu_prefill = s.moe_cpu_prefill;
             if (s.moe_cache_gib > 0)     llm.moe_cache_gib = s.moe_cache_gib;
+            // v2.3: честные слоты (выделено / обещано auto)
+            if (s.moe_cache_slots > 0)   llm.moe_cache_slots = s.moe_cache_slots;
+            if (s.moe_auto_slots > 0)    llm.moe_auto_slots = s.moe_auto_slots;
             if (s.moe_vram_free_mib > 0) llm.moe_vram_free_gib = s.moe_vram_free_mib / 1024.0;
             llm.ctx_used = s.ctx_used;                     // §6.8c: держим всё время жизни
             llm.last_task = s.last_task;   // v2.1: для Strata — счётчик завершённых запросов

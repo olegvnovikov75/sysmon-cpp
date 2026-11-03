@@ -156,6 +156,9 @@ std::string collector_to_json(const Collector& c) {
         j += "\"moe_place\":\"" + jesc(l.moe_place) + "\",";
         j += "\"moe_cpu_prefill\":" + jnum(l.moe_cpu_prefill) + ",";
         j += "\"moe_cache_gb\":" + jnum(l.moe_cache_gib) + ",";
+        // v2.3: аддитивно — реальные слоты expert cache (выделено / оценка auto)
+        j += "\"moe_cache_slots\":" + jnum(l.moe_cache_slots) + ",";
+        j += "\"moe_auto_slots\":" + jnum(l.moe_auto_slots) + ",";
         j += "\"moe_vram_free_gb\":" + jnum(l.moe_vram_free_gib) + "}";
     }
     j += "]}";
@@ -425,6 +428,8 @@ bool json_to_collector(const std::string& json, Collector& out, std::string& err
             ls.moe_place = e.getstr("moe_place");
             ls.moe_cpu_prefill = (int)e.getnum("moe_cpu_prefill", -1);
             ls.moe_cache_gib = e.getnum("moe_cache_gb", -1);
+            ls.moe_cache_slots = (int)e.getnum("moe_cache_slots", -1);   // v2.3 (старый сервер → -1)
+            ls.moe_auto_slots = (int)e.getnum("moe_auto_slots", -1);
             ls.moe_vram_free_gib = e.getnum("moe_vram_free_gb", -1);
             out.llms.push_back(ls);
         }

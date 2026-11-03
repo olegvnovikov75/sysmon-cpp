@@ -376,7 +376,13 @@ static void moe_compact(std::vector<std::vector<Seg>>& f, const LLMStats& l) {
     std::string p2;
     if (l.moe_cpu_prefill >= 0) p2 = std::string("CPU-prefill = ") + (l.moe_cpu_prefill ? "on" : "off");
     if (l.moe_cache_gib > 0) {
-        char b[32]; snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
+        // v2.3 (Шеф 03.11): показываем РЕАЛЬНО выделенные слоты кэша, а не полное число
+        // экспертов модели: «cache 24036 сл / 45.8 Gb». Число в «exp.» — резидентные эксперты.
+        char b[64];
+        if (l.moe_cache_slots > 0)
+            snprintf(b, sizeof(b), "cache %d сл / %.1f Gb", l.moe_cache_slots, l.moe_cache_gib);
+        else
+            snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
         p2 += (p2.empty() ? "" : "   ") + std::string(b);
     }
     // v2.2h (Шеф 02.11 14:59): порядок — сначала «CPU-prefill … cache …» строкой,

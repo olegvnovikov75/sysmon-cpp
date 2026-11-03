@@ -218,7 +218,12 @@ void render_text(const Collector& c) {
                 }
                 if (l.moe_cpu_prefill >= 0) p2 = std::string("CPU-prefill = ") + (l.moe_cpu_prefill ? "on" : "off");
                 if (l.moe_cache_gib > 0) {
-                    char b[32]; snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
+                    // v2.3: РЕАЛЬНО выделенные слоты expert cache (не полное число экспертов модели)
+                    char b[64];
+                    if (l.moe_cache_slots > 0)
+                        snprintf(b, sizeof(b), "cache %d сл / %.1f Gb", l.moe_cache_slots, l.moe_cache_gib);
+                    else
+                        snprintf(b, sizeof(b), "cache = %.1f Gb", l.moe_cache_gib);
                     p2 += (p2.empty() ? "" : "   ") + std::string(b);
                 }
                 if (p1.empty() && p2.empty()) { p1 = l.moe; p2.clear(); }   // старый удалённый JSON
